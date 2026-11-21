@@ -32,12 +32,12 @@ let GHOST = 600;             // ghost power-up length in ticks
 // Tile values: 0 empty, 1 wall, 2 brick, 3 range+, 4 bomb+, 5 speed+, 8 ghost, 9 kick, 6 steel crate (two hits), 7 gift crate (always drops),
 // 16+ttl flame, 32+ttl flame over a brick (may drop), 48+ttl flame over a gift (drops).
 let ROBOTO: const u8[:] = embed_file("Roboto-Regular.ttf");
-struct Player { x: i64, y: i64, on: u8, alive: u8, bombs: u8, range: u8, speed: u8, wins: u8, bits: u8, held: u8, placed: u8, ghost: u16, kick: u8 }
+struct Player { x: i64, y: i64, on: u8, alive: u8, bombs: u8, range: u8, speed: u8, wins: u8, streak: u8, bits: u8, held: u8, placed: u8, ghost: u16, kick: u8, name: u8[..12] }
 // dir: 0 still, 1 up, 2 down, 3 left, 4 right (a kicked bomb slides); m: ticks since its last step.
 struct Bomb { x: u8, y: u8, t: u8, range: u8, owner: u8, dir: u8, m: u8 }
 // A sheep wanders at random and blocks the way like a movable block. dir: 0 up, 1 down, 2 left, 3 right, 4 grazing.
 struct Sheep { x: i64, y: i64, alive: u8, dir: u8, t: u8 }
-struct State { grid: u8[195], players: Player[4], bombs: Bomb[..16], sheep: Sheep[2], drops: u8, over: i64, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
+struct State { grid: u8[195], players: Player[4], bombs: Bomb[..16], sheep: Sheep[2], drops: u8, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
 
 // UDP (udp.c): inputs and snapshots fly as datagrams when a client joins with `udp`; the WebSocket stays up for
 // joining, leaving and a slow heartbeat. Each snapshot carries its tick, so stale or reordered ones are dropped.
@@ -46,11 +46,18 @@ extern fn udp_peer(host: const u8[:], port: i64) -> i64;
 extern fn udp_send(fd: i64, b: const u8[:], peer: i64) -> i64;
 extern fn udp_recv(fd: i64, b: u8[:], from: i64&) -> i64;
 
-// Host: input from a connection (reply names it). Client: the key bits to send.
+// Host: input or profile update from a connection (reply names it). Client: key bits or profile to send.
 // seq numbers a client's input steps; the host echoes the latest one it has seen in State.ack.
-struct Msg { reply: http::MailAddress, bits: u8, leave: bool, seq: i64 }
+struct Msg { reply: http::MailAddress, bits: u8, leave: bool, seq: i64, is_profile: bool, name: u8[..12] }
 struct Pad { bits: u8, seq: i64 }
+struct Profile { name: u8[..12] }
 struct Lost { code: i64 }
+
+fn player_name(s: State&, i: i64, out: u8[>..]&) {
+    out.resize(0);
+    if s.players[i].name.len > 0 { out.append(s.players[i].name[..]); }
+    else { format(out, "P", i + 1); }
+}
 
 // ---- simulation -------------------------------------------------------------------------------
 
@@ -138,6 +145,7 @@ fn reset_round(s: State&, r: rng&) {
     }
     s.bombs.resize(0);
     s.over = 0;
+    s.dance_who = 255;
 }
 
 fn flame(s: State&, i: i64) {
@@ -321,13 +329,24 @@ fn tick(s: State&, r: rng&, n: i64) {
     }
     if (joined > 1 && alive <= 1) || (joined == 1 && alive == 0) {
         s.over = 150;
-        if joined > 1 && alive == 1 { s.players[last].wins += 1; }
+        s.dance_who = 255;
+        if joined > 1 && alive == 1 {
+            s.players[last].wins += 1;
+            s.players[last].streak += 1;
+            for i in 4 { if i != last { s.players[i].streak = 0; } }
+            if s.players[last].wins % 5 == 0 {
+                s.over = 270;
+                s.dance_who = last as u8;
+            }
+        } else {
+            for i in 4 { s.players[i].streak = 0; }
+        }
     }
 }
 
 // ---- network ----------------------------------------------------------------------------------
 
-struct Conn { ws: http::WebSocket = http::WebSocket { limit: 4096, .. }, reply: http::MailAddress }
+struct Conn { ws: http::WebSocket = http::WebSocket { limit: 8192, .. }, reply: http::MailAddress }
 
 fn serve_event(ev: http::Event, st: Conn&, out: http::Reply) {
     if ev.kind == http::REQUEST {
@@ -338,10 +357,17 @@ fn serve_event(ev: http::Event, st: Conn&, out: http::Reply) {
     } else if ev.kind == http::TIMEOUT {
         http::later(out, 5000);
     } else {
-        if ev.kind == http::CLOSED && st.reply.key != 0 { qput(Msg { st.reply, 0, true, 0 }); }
+        if ev.kind == http::CLOSED && st.reply.key != 0 { qput(Msg { st.reply, 0, true, 0, false, [] }); }
         http::ws_read(ev, st.ws, out) { op, data, o =>
             if st.reply.key == 0 { st.reply = http::later(o, 5000); }
-            if data.len >= 3 { qput(Msg { st.reply, data[0], false, (data[1] as i64) | ((data[2] as i64) << 8) }); }
+            if data.len >= 2 && data[0] == 255 {
+                var nm: u8[..12] = [];
+                let ln = min(data[1] as i64, min(12, data.len - 2));
+                for k in ln { nm.push(data[2 + k]); }
+                qput(Msg { st.reply, 0, false, 0, true, nm });
+            } else if data.len >= 3 {
+                qput(Msg { st.reply, data[0], false, (data[1] as i64) | ((data[2] as i64) << 8), false, [] });
+            }
         };
     }
 }
@@ -350,7 +376,7 @@ thread_fn server(cfg: http::Config) {
     http::report(http::serve(cfg, Conn { .. }) { ev, st, out => serve_event(ev, st, out); });
 }
 
-// Joins ws://url: sends the key bits main queues, and queues each snapshot back to main.
+// Joins ws://url: sends the key bits and profile updates main queues, and queues each snapshot back to main.
 thread_fn client(url: u8[..64]) {
     var session = http::session();
     var conn, err = http::ws_client_connect(session, url[..]);
@@ -358,6 +384,21 @@ thread_fn client(url: u8[..64]) {
     var bits: u8 = 0;
     var seq = 0;
     loop {
+        var prof_ok = false;
+        var prof = Profile { .. };
+        loop {
+            let pr, ok = qpoll<Profile>();
+            guard ok else { break; }
+            prof = pr;
+            prof_ok = true;
+        }
+        if prof_ok {
+            var pkt: u8[>..] = [];
+            pkt.push(255);
+            pkt.push(prof.name.len as u8);
+            for k in prof.name.len { pkt.push(prof.name[k]); }
+            guard http::ws_client_binary(conn, pkt).code == 0 else { break; }
+        }
         var one: u8[>..] = [];
         one.push(bits);
         one.push((seq & 255) as u8);
@@ -379,7 +420,7 @@ thread_fn client(url: u8[..64]) {
 
 // ---- sound ------------------------------------------------------------------------------------
 
-struct Sfx { place: audio::Sound, boom: audio::Sound, pickup: audio::Sound, die: audio::Sound, win: audio::Sound, clank: audio::Sound }
+struct Sfx { place: audio::Sound, boom: audio::Sound, pickup: audio::Sound, die: audio::Sound, win: audio::Sound, clank: audio::Sound, dance: audio::Sound }
 struct Fx { shake: f32, lost: bool, dust: float4[..64], last: float2[4] }
 
 // A synthesized effect: a sine sweeping f0 to f1 mixed with low-passed noise, under a decaying envelope.
@@ -398,9 +439,26 @@ fn synth(r: rng&, secs: f64, f0: f64, f1: f64, noise: f64, decay: f64) -> audio:
     return audio::create_sound(pcm);
 }
 
+// Upbeat celebratory fanfare for the every-5-wins victory dance.
+fn make_dance_sfx() -> audio::Sound {
+    let notes: i64[8] = [60, 64, 67, 72, 67, 72, 76, 84];
+    let step = 6400;
+    var pcm: f32[>..] = [];
+    pcm.resize(8 * step + 16000, 0.0);
+    for k in 8 {
+        let at = k * step;
+        let len = if k == 7 { step + 14000 } else { step };
+        voice(pcm, at, len, notes[k], 0, 0.35);
+        voice(pcm, at, len, notes[k] - 12, 2, 0.45);
+    }
+    for i in pcm.len { pcm[i] = max(-1.0, min(1.0, pcm[i] * 0.6)); }
+    return audio::create_sound(pcm);
+}
+
 fn make_sfx(r: rng&) -> Sfx {
     Sfx { synth(r, 0.12, 220.0, 110.0, 0.1, 6.0), synth(r, 0.7, 90.0, 35.0, 0.85, 4.5), synth(r, 0.25, 500.0, 1100.0, 0.0, 5.0),
-          synth(r, 0.6, 400.0, 60.0, 0.1, 3.0), synth(r, 0.7, 523.0, 1318.0, 0.0, 2.0), synth(r, 0.1, 1200.0, 800.0, 0.5, 12.0) }
+          synth(r, 0.6, 400.0, 60.0, 0.1, 3.0), synth(r, 0.7, 523.0, 1318.0, 0.0, 2.0), synth(r, 0.1, 1200.0, 800.0, 0.5, 12.0),
+          make_dance_sfx() }
 }
 
 // Adds midi note m at sample `at` for n samples: kind 0 is a 50% pulse, 1 a 25% pulse, 2 a triangle.
@@ -510,6 +568,12 @@ fn pan(x: i64) -> f32 { ((x as f32) / ((W * TILE) as f32) - 0.5) * 1.6 }
 
 // Plays what changed between two snapshots, so a client hears what the host's game did.
 fn hear(prev: State&, s: State&, sfx: Sfx, fx: Fx&) {
+    if prev.over == 0 && s.over > 0 {
+        if s.dance_who < 4 { audio::play(sfx.dance, 0.9, 0.0, 1.0, false); }
+        else {
+            for i in 4 { if s.players[i].on != 0 && s.players[i].wins > prev.players[i].wins { audio::play(sfx.win, 0.8, 0.0, 1.0, false); } }
+        }
+    }
     guard prev.over == 0 && s.over == 0 else { return; }
     for i in s.bombs.len {
         if bomb_at(prev, s.bombs[i].x, s.bombs[i].y) < 0 { audio::play(sfx.place, 0.6, pan(s.bombs[i].x * TILE), 1.0, false); }
@@ -731,6 +795,19 @@ fn draw_bomb(c: ui::Context, b: Bomb, ox: f32, oy: f32, t: f32, tm: f32) {
     ui::fill_circle(c, ui::rect(cx + k * 0.4 - sp, cy - k * 0.68 - sp, sp * 2.0, sp * 2.0), ui::rgb(255, 220, 80));
 }
 
+fn draw_character(c: ui::Context, i: i64, x: f32, y: f32, k: f32, fx: f32, fy: f32, walk: f32) {
+    if i == 1 { draw_goose(c, x, y, k, fx, fy, walk); return; }
+    ui::fill_circle(c, ui::rect(x - k * 0.5, y - k * 0.5 + walk, k, k), col(i));
+    ui::stroke_circle(c, ui::rect(x - k * 0.5, y - k * 0.5 + walk, k, k), 3.0, ui::rgb(255, 255, 255));
+    ui::fill_circle(c, ui::rect(x - k * 0.3, y - k * 0.42 + walk, k * 0.22, k * 0.22), ui::rgba(255, 255, 255, 120));
+    for e in 2 {
+        let ex = x + (if e == 0 { -1.0 } else { 1.0 }) * k * 0.2 + fx * k * 0.1;
+        let ey = y - k * 0.05 + fy * k * 0.1 + walk;
+        ui::fill_circle(c, ui::rect(ex - k * 0.13, ey - k * 0.16, k * 0.26, k * 0.32), ui::rgb(255, 255, 255));
+        ui::fill_circle(c, ui::rect(ex - k * 0.06 + fx * k * 0.06, ey - k * 0.06 + fy * k * 0.06, k * 0.14, k * 0.14), ui::rgb(20, 20, 30));
+    }
+}
+
 fn draw_player(c: ui::Context, s: State&, i: i64, x: f32, y: f32, t: f32, tm: f32) {
     let k = t * 0.76;
     let bits = s.players[i].bits;
@@ -751,22 +828,81 @@ fn draw_player(c: ui::Context, s: State&, i: i64, x: f32, y: f32, t: f32, tm: f3
     }
     if (bits & HOLD) != 0 { ui::stroke_rect(c, ui::rect(x - k * 0.62, y - k * 0.62, k * 1.24, k * 1.24), k * 0.3, 3.0, ui::rgba(255, 255, 255, 190)); }
     ui::fill_circle(c, ui::rect(x - k * 0.5, y + k * 0.3, k, k * 0.4), ui::rgba(0, 0, 0, 110));
-    if i == 1 { draw_goose(c, x, y, k, fx, fy, walk); } else {
-    ui::fill_circle(c, ui::rect(x - k * 0.5, y - k * 0.5 + walk, k, k), col(i));
-    ui::stroke_circle(c, ui::rect(x - k * 0.5, y - k * 0.5 + walk, k, k), 3.0, ui::rgb(255, 255, 255));
-    ui::fill_circle(c, ui::rect(x - k * 0.3, y - k * 0.42 + walk, k * 0.22, k * 0.22), ui::rgba(255, 255, 255, 120));
-    for e in 2 {
-        let ex = x + (if e == 0 { -1.0 } else { 1.0 }) * k * 0.2 + fx * k * 0.1;
-        let ey = y - k * 0.05 + fy * k * 0.1 + walk;
-        ui::fill_circle(c, ui::rect(ex - k * 0.13, ey - k * 0.16, k * 0.26, k * 0.32), ui::rgb(255, 255, 255));
-        ui::fill_circle(c, ui::rect(ex - k * 0.06 + fx * k * 0.06, ey - k * 0.06 + fy * k * 0.06, k * 0.14, k * 0.14), ui::rgb(20, 20, 30));
-    }
-    }
+    draw_character(c, i, x, y, k, fx, fy, walk);
     marker(c, i, x, y - k * 0.78 + walk, t * 0.13);
+    if s.players[i].name.len > 0 {
+        let nw = ui::text_width(ui::font(c), s.players[i].name[..]);
+        ui::fill_rect(c, ui::rect(x - nw * 0.5 - 4.0, y + k * 0.44, nw + 8.0, 20.0), 4.0, ui::rgba(10, 12, 20, 165));
+        text(c, x - nw * 0.5, y + k * 0.43, s.players[i].name[..], ui::rgb(245, 245, 250));
+    }
     if i == s.you {
         let bob = 0.06 * t * sin(tm * 6.0);
         ui::fill_triangle(c, x, y - k * 1.0 + bob, x + t * 0.1, y - k * 1.2 + bob, x - t * 0.1, y - k * 1.2 + bob, ui::rgb(255, 255, 255));
     }
+}
+
+// Every 5 wins: spotlight zoom-in where the winner dances right in everyone's faces!
+fn draw_dance(c: ui::Context, s: State&, who: i64, size: int2, tm: f32) {
+    let sw = size.x as f32;
+    let sh = size.y as f32;
+    let cx = sw * 0.5;
+    let cy = sh * 0.54;
+    let k = min(sw, sh) * 0.34;
+    ui::fill_rect(c, ui::rect(0, 0, sw, sh), 0.0, ui::rgba(8, 10, 20, 205));
+    // Rotating disco spotlight rays
+    for r in 6 {
+        let a = tm * 1.8 + r as f32 * 1.0472;
+        let rc = if r % 3 == 0 { ui::rgba(255, 210, 60, 38) } else if r % 3 == 1 { ui::rgba(100, 220, 255, 38) } else { ui::rgba(255, 100, 200, 38) };
+        ui::fill_triangle(c, cx, cy, cx + cos(a) * sw, cy + sin(a) * sh, cx + cos(a + 0.32) * sw, cy + sin(a + 0.32) * sh, rc);
+    }
+    // Stage spotlight disc
+    ui::fill_circle(c, ui::rect(cx - k * 0.95, cy + k * 0.32, k * 1.9, k * 0.52), ui::rgba(255, 235, 140, 55));
+    ui::fill_circle(c, ui::rect(cx - k * 0.72, cy + k * 0.38, k * 1.44, k * 0.38), ui::rgba(255, 245, 200, 85));
+    // Animated confetti
+    for p in 28 {
+        let pf = p as f32;
+        let px = ((pf * 97.3 + sin(tm * 2.5 + pf) * 40.0) % sw + sw) % sw;
+        let py = ((pf * 61.7 + tm * (140.0 + (p % 5) as f32 * 25.0)) % sh);
+        let cc = col(p % 4);
+        ui::fill_rect(c, ui::rect(px, py, 10.0, 10.0), 2.0, cc);
+    }
+    // Bouncing, wiggling, groove-spinning winner right in everyone's faces
+    let beat = tm * 11.0;
+    let jump = abs(sin(beat)) * k * 0.22;
+    let sway = sin(beat) * k * 0.14;
+    let dx = cx + sway;
+    let dy = cy - jump;
+    let spin = ((tm * 3.5) as i64) % 4;
+    let fx: f32 = if spin == 1 { 1.0 } else if spin == 3 { -1.0 } else { 0.0 };
+    let fy: f32 = if spin == 0 || spin == 2 { 1.0 } else { 0.0 };
+    let arm_l = sin(beat * 2.0) * k * 0.25;
+    let arm_r = -arm_l;
+    ui::stroke_line(c, dx - k * 0.44, dy, dx - k * 0.78, dy - k * 0.2 + arm_l, 8.0, ui::rgb(255, 255, 255));
+    ui::stroke_line(c, dx + k * 0.44, dy, dx + k * 0.78, dy - k * 0.2 + arm_r, 8.0, ui::rgb(255, 255, 255));
+    draw_character(c, who, dx, dy, k, fx, fy, sin(beat * 2.0) * k * 0.04);
+    // Golden crown bouncing on top
+    let cy0 = dy - k * 0.62 - abs(cos(beat)) * k * 0.08;
+    let cw = k * 0.44;
+    let ch = k * 0.22;
+    let gold = ui::rgb(255, 215, 50);
+    ui::fill_rect(c, ui::rect(dx - cw * 0.5, cy0, cw, ch * 0.5), 3.0, gold);
+    ui::fill_triangle(c, dx - cw * 0.5, cy0, dx - cw * 0.22, cy0, dx - cw * 0.42, cy0 - ch * 0.7, gold);
+    ui::fill_triangle(c, dx - cw * 0.16, cy0, dx + cw * 0.16, cy0, dx, cy0 - ch * 0.9, gold);
+    ui::fill_triangle(c, dx + cw * 0.22, cy0, dx + cw * 0.5, cy0, dx + cw * 0.42, cy0 - ch * 0.7, gold);
+    // Orbiting sparkles
+    for sp in 6 {
+        let a = tm * 4.0 + sp as f32 * 1.0472;
+        let sx = dx + cos(a) * k * 0.78;
+        let sy = dy + sin(a) * k * 0.58;
+        let r = 6.0 + 4.0 * sin(tm * 12.0 + sp as f32);
+        ui::fill_circle(c, ui::rect(sx - r, sy - r, r * 2.0, r * 2.0), ui::rgb(255, 245, 130));
+    }
+    var sub: u8[>..] = [];
+    if s.players[who].streak >= 2 { format(sub, "VICTORY DANCE!  ", s.players[who].streak, " WIN STREAK!"); }
+    else { sub.append("VICTORY DANCE!"); }
+    let sw2 = ui::text_width(ui::font(c), sub);
+    ui::fill_rect(c, ui::rect((sw - sw2) * 0.5 - 16.0, sh - 68.0, sw2 + 32.0, 34.0), 8.0, ui::rgba(15, 18, 30, 210));
+    text(c, (sw - sw2) * 0.5, sh - 63.0, sub, ui::rgb(255, 225, 90));
 }
 
 fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&, mode: const u8[:]) {
@@ -811,30 +947,50 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
         var x: f32 = 16.0;
         for i in 4 {
             guard s.players[i].on != 0 else { continue; }
+            var nm: u8[>..] = [];
+            player_name(s, i, nm);
             var line: u8[>..] = [];
-            format(line, "P", i + 1, "  ", s.players[i].wins);
+            if s.players[i].streak >= 2 { format(line, nm[..], " ", s.players[i].wins, " [", s.players[i].streak, "x]"); }
+            else { format(line, nm[..], " ", s.players[i].wins); }
+            let lw = ui::text_width(ui::font(hud), line);
+            let boxw = max(92.0, lw + 34.0);
             marker(hud, i, x + 10.0, 17.0, 8.0);
-            text(hud, x + 26.0, 4.0, line, if s.players[i].alive != 0 { ui::rgb(240, 240, 245) } else { ui::rgb(120, 124, 140) });
-            if i == s.you && mode != "solo" { ui::stroke_rect(hud, ui::rect(x - 6.0, 2.0, 112.0, 28.0), 6.0, 2.0, ui::rgb(255, 255, 255)); }
-            x += 124.0;
+            text(hud, x + 24.0, 4.0, line, if s.players[i].alive != 0 { ui::rgb(240, 240, 245) } else { ui::rgb(120, 124, 140) });
+            if i == s.you && mode != "solo" { ui::stroke_rect(hud, ui::rect(x - 6.0, 2.0, boxw, 28.0), 6.0, 2.0, ui::rgb(255, 255, 255)); }
+            x += boxw + 12.0;
         }
-        var drp: u8[>..] = [];
-        format(drp, "Power-ups ", s.drops, "%");
-        text(hud, size.x - 444.0, 4.0, drp, ui::rgb(200, 205, 220));
         var tag: u8[>..] = [];
         if mode == "solo" { tag.append("SOLO"); } else if mode == "host" { tag.append("HOST"); } else { format(tag, "CLIENT P", s.you + 1); if mode == "udp" { tag.append(" UDP"); } }
         if fx.lost { tag.append("  DISCONNECTED"); }
-        text(hud, size.x - 24.0 - ui::text_width(ui::font(hud), tag), 4.0, tag, ui::rgb(150, 156, 176));
+        text(hud, size.x - 16.0 - ui::text_width(ui::font(hud), tag), 4.0, tag, ui::rgb(150, 156, 176));
+        if s.over > 0 && s.dance_who < 4 {
+            draw_dance(hud, s, s.dance_who as i64, size, tm);
+        }
     }
     ui::end(hud);
     if ui::begin(big, "B", ui::rect(0, 0, size.x, size.y), ui::WINDOW_NO_INPUT | ui::WINDOW_NO_SCROLLBAR) && s.over > 0 {
-        var who = -1;
-        for i in 4 { if s.players[i].on != 0 && s.players[i].alive != 0 { who = i; } }
-        var msg: u8[>..] = [];
-        if who >= 0 && s.players[who].on != 0 { format(msg, "P", who + 1, " WINS!"); } else { msg.append("DRAW"); }
-        let w = ui::text_width(ui::font(big), msg);
-        ui::fill_rect(big, ui::rect(0, size.y / 2.0 - 60.0, size.x, 110.0), 0.0, ui::rgba(10, 12, 20, 190));
-        text(big, (size.x as f32 - w) / 2.0, size.y / 2.0 - 52.0, msg, if who >= 0 { col(who) } else { ui::rgb(230, 230, 235) });
+        if s.dance_who < 4 {
+            let who = s.dance_who as i64;
+            var nm: u8[>..] = [];
+            player_name(s, who, nm);
+            var title: u8[>..] = [];
+            format(title, nm[..], " - ", s.players[who].wins, " WINS!");
+            let tw = ui::text_width(ui::font(big), title);
+            text(big, (size.x as f32 - tw) * 0.5, 48.0, title, col(who));
+        } else {
+            var who = -1;
+            for i in 4 { if s.players[i].on != 0 && s.players[i].alive != 0 { who = i; } }
+            var msg: u8[>..] = [];
+            if who >= 0 && s.players[who].on != 0 {
+                var nm: u8[>..] = [];
+                player_name(s, who, nm);
+                if s.players[who].streak >= 2 { format(msg, nm[..], " WINS! (", s.players[who].streak, "x)"); }
+                else { format(msg, nm[..], " WINS!"); }
+            } else { msg.append("DRAW"); }
+            let w = ui::text_width(ui::font(big), msg);
+            ui::fill_rect(big, ui::rect(0, size.y / 2.0 - 60.0, size.x, 110.0), 0.0, ui::rgba(10, 12, 20, 190));
+            text(big, (size.x as f32 - w) / 2.0, size.y / 2.0 - 52.0, msg, if who >= 0 { col(who) } else { ui::rgb(230, 230, 235) });
+        }
     }
     ui::end(big);
 }
@@ -916,7 +1072,15 @@ fn main() {
     let mode = if argv.len > 1 { argv[1] } else { "solo" };
     guard mode == "solo" || mode == "host" || (mode == "join" && argv.len > 2) else { abort("usage: bomberman [solo | host | join HOST]"); }
     var frames = -1;
-    for i in argv.len { if argv[i] == "--frames" && i + 1 < argv.len { frames = parse_int(argv[i + 1]); } }
+    var my_name: u8[..12] = [];
+    for i in argv.len {
+        if argv[i] == "--frames" && i + 1 < argv.len { frames = parse_int(argv[i + 1]); }
+        if argv[i] == "--name" && i + 1 < argv.len {
+            my_name.resize(0);
+            let ln = min(12, argv[i + 1].len);
+            for k in ln { my_name.push(argv[i + 1][k]); }
+        }
+    }
     var s = State { .. };
     var prev = State { .. };
     var r = rng { random_seed() };
@@ -925,7 +1089,7 @@ fn main() {
     var upeer: i64[4] = [-1, -1, -1, -1];      // host: where each client's datagrams come from
     var uage: i64[4] = [999, 999, 999, 999];   // host: ticks since a client's last datagram
     var rbuf: u8[>..] = [];
-    rbuf.resize(2048, 0);
+    rbuf.resize(4096, 0);
     let want_udp = mode == "join" && argv.len > 3 && argv[3] == "udp";
     let csock = if want_udp { udp_open(0) } else { -1 };
     let hostpeer = if want_udp { udp_peer(argv[2], 8080) } else { -1 };
@@ -937,16 +1101,18 @@ fn main() {
     let none = http::MailAddress { .. };
     var addr: http::MailAddress[4] = [none, none, none, none];
     s.players[0].on = 1;
+    s.players[0].name = my_name;
     s.drops = 33;
     reset_round(s, r);
     if mode == "host" {
-        let cfg = http::Config { port: 8080, workers: 1, mail_slots: 64, mail_size: 1024, max_waiting: 16, .. };
+        let cfg = http::Config { port: 8080, workers: 1, mail_slots: 64, mail_size: 4096, max_waiting: 16, .. };
         thread_spawn(server, cfg);
     }
     if mode == "join" {
         var url: u8[..64] = [];
         format(url, "ws://", argv[2], ":8080/ws");
         thread_spawn(client, url);
+        if my_name.len > 0 { qput(Profile { my_name }); }
     }
     guard gfx::open("Bomberman", 960, 720, gfx::WINDOW_RESIZABLE) else { abort(str("gfx: ", gfx::error())); }
     audio::open();
@@ -966,6 +1132,8 @@ fn main() {
     let hud = overlay(20.0);
     let big = overlay(72.0);
     let panel = overlay(18.0);
+    let menu = ui::create_from_memory(ROBOTO, 17.0);
+    var menu_open = frames < 0 && my_name.len == 0;
     let z = float2 { 0.0, 0.0 };
     var shown: float2[4] = [z, z, z, z];
     var fx = Fx { .. };
@@ -977,18 +1145,23 @@ fn main() {
     var n = 0;
     var frame = 0;
     while gfx::frame() {
-        if gfx::key_pressed("Escape") || frame == frames { break; }
-        if gfx::key_pressed("N") && !own {          // switch between the two built-in tracks
+        if frame == frames { break; }
+        if gfx::key_pressed("Escape") {
+            if menu_open { menu_open = false; } else { break; }
+        }
+        let typing = menu_open || ui::wants_keyboard(menu);
+        if !typing && gfx::key_pressed("N") && !own {          // switch between the two built-in tracks
             track = 1 - track;
             audio::stop(tune);
             tune = audio::play(if track == 0 { song0 } else { song1 }, if muted { 0.0 } else { mvol }, 0.0, 1.0, true);
         }
-        if gfx::key_pressed("M") { muted = !muted; audio::set_voice(tune, if muted { 0.0 } else { mvol }, 0.0, 1.0); }
+        if !typing && gfx::key_pressed("M") { muted = !muted; audio::set_voice(tune, if muted { 0.0 } else { mvol }, 0.0, 1.0); }
         ui::input_from_gfx(hud);
         ui::input_from_gfx(big);
         ui::input_from_gfx(panel);
+        ui::input_from_gfx(menu);
         if frames >= 0 { sleep(0.016); }
-        let bits = if frames >= 0 { bot(frame, if mode == "join" { 3 } else { 0 }) } else { keys() };
+        let bits = if frames >= 0 { bot(frame, if mode == "join" { 3 } else { 0 }) } else if typing { 0 as u8 } else { keys() };
         acc += if frames >= 0 { 1.0 / 60.0 } else { min(gfx::delta_time(), 0.1) };
         if mode == "join" {
             loop {          // datagram snapshots join the WebSocket's in one stream
@@ -1052,13 +1225,14 @@ fn main() {
                 guard ok else { break; }
                 var who = -1;
                 for i in 1..4 { if s.players[i].on != 0 && addr[i].key == m.reply.key { who = i; } }
-                if who >= 0 && uage[who] < 30 && !m.leave { continue; }   // UDP is carrying this player's input
+                if who >= 0 && uage[who] < 30 && !m.leave && !m.is_profile { continue; }   // UDP is carrying this player's input
                 if who < 0 && !m.leave {
                     for i in 1..4 { if who < 0 && s.players[i].on == 0 { who = i; } }
-                    if who >= 0 { addr[who] = m.reply; s.players[who].on = 1; upeer[who] = -1; uage[who] = 999; reset_round(s, r); }
+                    if who >= 0 { addr[who] = m.reply; s.players[who].on = 1; s.players[who].name.resize(0); s.players[who].wins = 0; s.players[who].streak = 0; upeer[who] = -1; uage[who] = 999; reset_round(s, r); }
                 }
                 if who < 0 { continue; }
                 if m.leave { s.players[who].on = 0; s.players[who].alive = 0; upeer[who] = -1; uage[who] = 999; }
+                else if m.is_profile { s.players[who].name = m.name; }
                 else { s.players[who].bits = m.bits; ack[who] = m.seq; }
             }
             loop {          // datagrams: 'B', slot, bits, seq lo, seq hi
@@ -1116,26 +1290,52 @@ fn main() {
             fx.last[i] = shown[i];
         }
         draw(hud, big, s, shown, fx, if want_udp { "udp" } else { mode });
-        if mode != "join" {          // the host sets how often bricks leave power-ups
-            let sz = gfx::screen_size();
-            if ui::begin(panel, "R", ui::rect(sz.x as f32 - 324.0, 5.0, 170.0, 26.0), ui::WINDOW_NO_SCROLLBAR) {
-                ui::layout_row_dynamic(panel, 20.0, 1);
+        let sz = gfx::screen_size();
+        if ui::begin(panel, "Bar", ui::rect(sz.x as f32 - 390.0, 4.0, 260.0, 28.0), ui::WINDOW_NO_SCROLLBAR) {
+            if mode != "join" {
+                let rat: f32[2] = [0.35, 0.65];
+                ui::layout_row(panel, ui::DYNAMIC, 22.0, rat);
+                if ui::button_label(panel, "Profile") { menu_open = !menu_open; }
                 s.drops = ui::slide_int(panel, 0, s.drops as i64, 100, 1) as u8;
+            } else {
+                ui::layout_row_dynamic(panel, 22.0, 1);
+                if ui::button_label(panel, "Profile") { menu_open = !menu_open; }
             }
-            ui::end(panel);
+        }
+        ui::end(panel);
+        if menu_open {
+            let mw: f32 = 340.0;
+            let mh: f32 = 160.0;
+            if ui::begin(menu, "Player Setup", ui::rect((sz.x as f32 - mw) * 0.5, (sz.y as f32 - mh) * 0.5, mw, mh), ui::WINDOW_BORDER | ui::WINDOW_TITLE | ui::WINDOW_NO_SCROLLBAR) {
+                ui::layout_row_dynamic(menu, 24.0, 1);
+                ui::label(menu, "Enter your name (max 12 chars):", ui::TEXT_LEFT);
+                ui::layout_row_dynamic(menu, 30.0, 1);
+                let ed = ui::edit_string(menu, ui::EDIT_FIELD | ui::EDIT_SIG_ENTER, my_name, ui::FILTER_ASCII);
+                ui::layout_row_dynamic(menu, 32.0, 1);
+                let done = ui::button_label(menu, "Play!") || (ed & ui::EDIT_COMMITTED) != 0;
+                if mode == "join" {
+                    if (ed & ui::EDIT_ACTIVE) != 0 || done { qput(Profile { my_name }); }
+                } else {
+                    s.players[0].name = my_name;
+                }
+                if done { menu_open = false; }
+            }
+            ui::end(menu);
         }
         gfx::begin_screen(float4 { 0.06, 0.07, 0.1, 1.0 });
         gfx::end_pass();
         ui::render(hud);
         ui::render(big);
         ui::render(panel);
+        ui::render(menu);
         frame += 1;
     }
-    for i in 4 { if s.players[i].on != 0 { print("player ", i, " at ", s.players[i].x / TILE, ",", s.players[i].y / TILE, " alive ", s.players[i].alive, " wins ", s.players[i].wins); } }
+    for i in 4 { if s.players[i].on != 0 { print("player ", i, " at ", s.players[i].x / TILE, ",", s.players[i].y / TILE, " alive ", s.players[i].alive, " wins ", s.players[i].wins, " streak ", s.players[i].streak); } }
     if mode != "solo" { print("datagrams ", n_udp, ", snapshots applied ", n_applied); }
     ui::destroy(hud);
     ui::destroy(big);
     ui::destroy(panel);
+    ui::destroy(menu);
     audio::close();
     gfx::close();
 }
