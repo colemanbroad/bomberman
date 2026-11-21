@@ -19,3 +19,7 @@ the host sends a snapshot every 60 Hz tick.
 
 Power-ups: flame (range), bomb (extra bomb), bolt (speed), and the purple ghost (10 s): you turn invisible to
 everyone else, leaving only a faint trail of dust while you move. You still see a faint outline of yourself.
+
+Characters: player 2 is a goose, and her bombs are eggs. Two sheep wander at random and block the way like movable
+blocks (flames kill them; they return next round). The host (or solo player) has a slider in the top bar for the
+percentage of burned bricks that leave a power-up (default 33). Gift crates always drop one.

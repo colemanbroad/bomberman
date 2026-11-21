@@ -33,7 +33,9 @@ let GHOST = 600;             // ghost power-up length in ticks
 let ROBOTO: const u8[:] = embed_file("Roboto-Regular.ttf");
 struct Player { x: i64, y: i64, on: u8, alive: u8, bombs: u8, range: u8, speed: u8, wins: u8, bits: u8, held: u8, placed: u8, ghost: u16 }
 struct Bomb { x: u8, y: u8, t: u8, range: u8, owner: u8 }
-struct State { grid: u8[195], players: Player[4], bombs: Bomb[..16], over: i64, you: u8 }
+// A sheep wanders at random and blocks the way like a movable block. dir: 0 up, 1 down, 2 left, 3 right, 4 grazing.
+struct Sheep { x: i64, y: i64, alive: u8, dir: u8, t: u8 }
+struct State { grid: u8[195], players: Player[4], bombs: Bomb[..16], sheep: Sheep[2], drops: u8, over: i64, you: u8 }   // drops: percent of brick fires that leave a power-up
 
 // Host: input from a connection (reply names it). Client: the key bits to send.
 struct Msg { reply: http::MailAddress, bits: u8, leave: bool }
@@ -47,26 +49,48 @@ fn bomb_at(s: State&, tx: i64, ty: i64) -> i64 {
     return -1;
 }
 
-// Does player p's box centered at x y hit a wall, block, or a bomb it is not already standing on?
+fn hits(ax: i64, ay: i64, bx: i64, by: i64) -> bool { return abs(ax - bx) < 2 * HB && abs(ay - by) < 2 * HB; }
+
+// Does a box centered at x y hit a wall, block, or a bomb that the box (now at ox oy) is not already standing on?
+fn tiles_blocked(s: State&, ox: i64, oy: i64, x: i64, y: i64) -> bool {
+    for ty in (y - HB) / TILE..(y + HB - 1) / TILE + 1 {
+        for tx in (x - HB) / TILE..(x + HB - 1) / TILE + 1 {
+            let g = s.grid[ty * W + tx];
+            if g == 1 || g == 2 { return true; }
+            let on_it = tx >= (ox - HB) / TILE && tx <= (ox + HB - 1) / TILE &&
+                        ty >= (oy - HB) / TILE && ty <= (oy + HB - 1) / TILE;
+            if bomb_at(s, tx, ty) >= 0 && !on_it { return true; }
+        }
+    }
+    return false;
+}
+
+// Player i, moving to x y, is stopped by tiles, holding players, and sheep (unless already overlapping them).
 fn blocked(s: State&, i: i64, x: i64, y: i64) -> bool {
     let p = s.players[i];
     for j in 4 {
         let q = s.players[j];
         guard j != i && q.on != 0 && q.alive != 0 && (q.bits & HOLD) != 0 else { continue; }
-        let into = abs(x - q.x) < 2 * HB && abs(y - q.y) < 2 * HB;
-        let inside = abs(p.x - q.x) < 2 * HB && abs(p.y - q.y) < 2 * HB;
-        if into && !inside { return true; }
+        if hits(x, y, q.x, q.y) && !hits(p.x, p.y, q.x, q.y) { return true; }
     }
-    for ty in (y - HB) / TILE..(y + HB - 1) / TILE + 1 {
-        for tx in (x - HB) / TILE..(x + HB - 1) / TILE + 1 {
-            let g = s.grid[ty * W + tx];
-            if g == 1 || g == 2 { return true; }
-            let on_it = tx >= (p.x - HB) / TILE && tx <= (p.x + HB - 1) / TILE &&
-                        ty >= (p.y - HB) / TILE && ty <= (p.y + HB - 1) / TILE;
-            if bomb_at(s, tx, ty) >= 0 && !on_it { return true; }
-        }
+    for k in 2 {
+        let q = s.sheep[k];
+        if q.alive != 0 && hits(x, y, q.x, q.y) && !hits(p.x, p.y, q.x, q.y) { return true; }
     }
-    return false;
+    return tiles_blocked(s, p.x, p.y, x, y);
+}
+
+fn sheep_blocked(s: State&, k: i64, x: i64, y: i64) -> bool {
+    let me = s.sheep[k];
+    for j in 4 {
+        let q = s.players[j];
+        if q.on != 0 && q.alive != 0 && hits(x, y, q.x, q.y) && !hits(me.x, me.y, q.x, q.y) { return true; }
+    }
+    for j in 2 {
+        let q = s.sheep[j];
+        if j != k && q.alive != 0 && hits(x, y, q.x, q.y) && !hits(me.x, me.y, q.x, q.y) { return true; }
+    }
+    return tiles_blocked(s, me.x, me.y, x, y);
 }
 
 fn reset_round(s: State&, r: rng&) {
@@ -95,6 +119,11 @@ fn reset_round(s: State&, r: rng&) {
         s.players[i].placed = 0;
         s.players[i].held = 0;
         s.players[i].ghost = 0;
+    }
+    for k in 2 {
+        let tx = if k == 0 { 5 } else { W - 6 };
+        s.grid[(H / 2) * W + tx] = 0;
+        s.sheep[k] = Sheep { tx * TILE + TILE / 2, (H / 2) * TILE + TILE / 2, 1, 4, 0 };
     }
     s.bombs.resize(0);
     s.over = 0;
@@ -176,6 +205,19 @@ fn tick(s: State&, r: rng&, n: i64) {
         return;
     }
     for i in 4 { if s.players[i].on != 0 && s.players[i].alive != 0 { step_player(s, i); } }
+    for k in 2 {
+        guard s.sheep[k].alive != 0 else { continue; }
+        if s.sheep[k].t == 0 {
+            s.sheep[k].dir = r.rand_int(5) as u8;
+            s.sheep[k].t = (40 + r.rand_int(80)) as u8;
+        } else { s.sheep[k].t -= 1; }
+        let d = s.sheep[k].dir;
+        let dx = if d == 2 { -2 } else if d == 3 { 2 } else { 0 };
+        let dy = if d == 0 { -2 } else if d == 1 { 2 } else { 0 };
+        if d == 4 { continue; }
+        if sheep_blocked(s, k, s.sheep[k].x + dx, s.sheep[k].y + dy) { s.sheep[k].t = 0; }
+        else { s.sheep[k].x += dx; s.sheep[k].y += dy; }
+    }
     for i in s.bombs.len { s.bombs[i].t -= 1; }
     loop {
         var again = false;
@@ -196,12 +238,15 @@ fn tick(s: State&, r: rng&, n: i64) {
             let g = s.grid[i];
             if g < 16 { continue; }
             if g % 16 > 0 { s.grid[i] = g - 1; }
-            else if g >= 48 || (g >= 32 && r.rand_int(3) == 0) {
+            else if g >= 48 || (g >= 32 && r.rand_int(100) < s.drops as i64) {
                 let k = r.rand_int(5);
                 s.grid[i] = if k == 4 { 8 } else { 3 + k as u8 };
             }
             else { s.grid[i] = 0; }
         }
+    }
+    for k in 2 {
+        if s.sheep[k].alive != 0 && s.grid[(s.sheep[k].y / TILE) * W + s.sheep[k].x / TILE] >= 16 { s.sheep[k].alive = 0; }
     }
     var joined = 0;
     var alive = 0;
@@ -360,6 +405,7 @@ fn hear(prev: State&, s: State&, sfx: Sfx, fx: Fx&) {
         }
     }
     for i in W * H { if prev.grid[i] == 6 && s.grid[i] == 2 { audio::play(sfx.clank, 0.5, pan((i % W) * TILE), 1.0, false); } }
+    for k in 2 { if prev.sheep[k].alive != 0 && s.sheep[k].alive == 0 { audio::play(sfx.die, 0.6, pan(s.sheep[k].x), 1.6, false); } }
     for i in 4 {
         let a = prev.players[i];
         let b = s.players[i];
@@ -479,10 +525,77 @@ fn draw_flame(c: ui::Context, g: u8, x: f32, y: f32, t: f32, tm: f32) {
     ui::fill_rect(c, ui::rect(x + t * 0.28, y + t * 0.28, t * 0.44, t * 0.44), t * 0.2, ui::rgba(255, 245, 190, a));
 }
 
+// Player 2 is a goose, and her bombs are eggs.
+fn draw_egg(c: ui::Context, b: Bomb, cx: f32, cy: f32, k: f32, tm: f32) {
+    let w = k * 0.62;
+    let h = k * 0.8;
+    let x = cx + 0.03 * k * sin(tm * 8.0 + b.t);
+    let red = b.t < 45 && (b.t / 6) % 2 == 0;
+    let body = if red { ui::rgb(255, 160, 140) } else { ui::rgb(250, 244, 226) };
+    ui::fill_circle(c, ui::rect(cx - k * 0.4, cy + k * 0.22, k * 0.8, k * 0.3), ui::rgba(0, 0, 0, 90));
+    ui::fill_rect(c, ui::rect(x - w * 0.5, cy - h * 0.5, w, h), w * 0.5, body);
+    ui::stroke_rect(c, ui::rect(x - w * 0.5, cy - h * 0.5, w, h), w * 0.5, 3.0, col(b.owner));
+    ui::fill_circle(c, ui::rect(x + w * 0.1, cy + h * 0.05, w * 0.12, w * 0.12), ui::rgba(190, 160, 120, 170));
+    ui::fill_circle(c, ui::rect(x - w * 0.25, cy + h * 0.2, w * 0.1, w * 0.1), ui::rgba(190, 160, 120, 170));
+    ui::fill_circle(c, ui::rect(x - w * 0.3, cy - h * 0.3, w * 0.22, w * 0.3), ui::rgba(255, 255, 255, 170));
+    if b.t < 45 {        // about to hatch with a bang
+        ui::stroke_line(c, x - w * 0.4, cy - h * 0.05, x - w * 0.1, cy + h * 0.1, 2.0, ui::rgb(90, 70, 60));
+        ui::stroke_line(c, x - w * 0.1, cy + h * 0.1, x + w * 0.1, cy - h * 0.08, 2.0, ui::rgb(90, 70, 60));
+        ui::stroke_line(c, x + w * 0.1, cy - h * 0.08, x + w * 0.4, cy + h * 0.08, 2.0, ui::rgb(90, 70, 60));
+    }
+}
+
+fn draw_goose(c: ui::Context, x: f32, y: f32, k: f32, fx: f32, fy: f32, walk: f32) {
+    let orange = ui::rgb(255, 150, 30);
+    let sw = 0.06 * k * sin(walk * 40.0 / k);
+    ui::fill_circle(c, ui::rect(x - k * 0.28 + sw, y + k * 0.36, k * 0.22, k * 0.14), orange);
+    ui::fill_circle(c, ui::rect(x + k * 0.06 - sw, y + k * 0.36, k * 0.22, k * 0.14), orange);
+    ui::fill_circle(c, ui::rect(x - k * 0.5, y - k * 0.4 + walk, k, k * 0.95), ui::rgb(250, 250, 252));
+    ui::stroke_circle(c, ui::rect(x - k * 0.5, y - k * 0.4 + walk, k, k * 0.95), 3.0, col(1));
+    ui::fill_circle(c, ui::rect(x - k * 0.46, y - k * 0.05 + walk, k * 0.28, k * 0.5), ui::rgb(205, 215, 235));
+    ui::fill_circle(c, ui::rect(x + k * 0.18, y - k * 0.05 + walk, k * 0.28, k * 0.5), ui::rgb(205, 215, 235));
+    let hx = x + fx * k * 0.2;
+    let hy = y - k * 0.38 + fy * k * 0.1 + walk;
+    ui::fill_rect(c, ui::rect(hx - k * 0.1, hy, k * 0.2, k * 0.3), 0.0, ui::rgb(250, 250, 252));
+    ui::fill_circle(c, ui::rect(hx - k * 0.24, hy - k * 0.24, k * 0.48, k * 0.48), ui::rgb(250, 250, 252));
+    ui::fill_triangle(c, hx + fx * k * 0.36 - fy * k * 0.1, hy + fy * k * 0.36 + fx * k * 0.1,
+                         hx + fx * k * 0.36 + fy * k * 0.1, hy + fy * k * 0.36 - fx * k * 0.1,
+                         hx + fx * k * 0.6, hy + fy * k * 0.6 + (if fy == 0.0 { k * 0.04 } else { 0.0 }), orange);
+    if fy >= 0.0 {
+        for e in 2 {
+            let sd = if e == 0 { -1.0 } else { 1.0 };
+            let ex = hx + sd * (if fy > 0.0 { k * 0.11 } else { 0.0 }) + fx * k * 0.1;
+            ui::fill_circle(c, ui::rect(ex - k * 0.04, hy - k * 0.06, k * 0.08, k * 0.1), ui::rgb(20, 20, 30));
+        }
+    }
+}
+
+fn draw_sheep(c: ui::Context, q: Sheep, x: f32, y: f32, t: f32, tm: f32) {
+    let k = t * 0.8;
+    let bob = if q.dir < 4 { 0.03 * t * sin(tm * 14.0) } else { 0.0 };
+    let wool = ui::rgb(245, 244, 238);
+    ui::fill_circle(c, ui::rect(x - k * 0.55, y + k * 0.25, k * 1.1, k * 0.35), ui::rgba(0, 0, 0, 100));
+    for l in 2 { ui::fill_rect(c, ui::rect(x - k * 0.26 + l * k * 0.32, y + k * 0.28, k * 0.1, k * 0.2), 2.0, ui::rgb(50, 46, 50)); }
+    ui::fill_circle(c, ui::rect(x - k * 0.5, y - k * 0.42 + bob, k, k * 0.95), ui::rgb(222, 222, 220));
+    for n in 7 {
+        let a: f32 = n as f32 * 0.9;
+        ui::fill_circle(c, ui::rect(x + cos(a) * k * 0.28 - k * 0.2, y + sin(a) * k * 0.26 - k * 0.12 + bob, k * 0.4, k * 0.4), wool);
+    }
+    ui::fill_circle(c, ui::rect(x - k * 0.34, y - k * 0.34 + bob, k * 0.68, k * 0.72), wool);
+    ui::fill_rect(c, ui::rect(x - k * 0.17, y - k * 0.18 + bob, k * 0.34, k * 0.46), k * 0.15, ui::rgb(62, 60, 66));
+    ui::fill_circle(c, ui::rect(x - k * 0.1, y + k * 0.14 + bob, k * 0.2, k * 0.12), ui::rgb(100, 98, 106));
+    ui::fill_circle(c, ui::rect(x - k * 0.11, y - k * 0.08 + bob, k * 0.06, k * 0.06), ui::rgb(255, 255, 255));
+    ui::fill_circle(c, ui::rect(x + k * 0.05, y - k * 0.08 + bob, k * 0.06, k * 0.06), ui::rgb(255, 255, 255));
+    ui::fill_rect(c, ui::rect(x - k * 0.34, y - k * 0.14 + bob, k * 0.2, k * 0.06), 2.0, ui::rgb(40, 38, 44));
+    ui::fill_rect(c, ui::rect(x + k * 0.14, y - k * 0.14 + bob, k * 0.2, k * 0.06), 2.0, ui::rgb(40, 38, 44));
+    ui::fill_circle(c, ui::rect(x - k * 0.2, y - k * 0.32 + bob, k * 0.4, k * 0.26), wool);
+}
+
 fn draw_bomb(c: ui::Context, b: Bomb, ox: f32, oy: f32, t: f32, tm: f32) {
     let k = (0.72 + 0.06 * sin(tm * 10.0 + b.t)) * t;
     let cx = ox + (b.x + 0.5) * t;
     let cy = oy + (b.y + 0.5) * t;
+    if b.owner == 1 { draw_egg(c, b, cx, cy, k, tm); return; }
     ui::fill_circle(c, ui::rect(cx - k * 0.5, cy + k * 0.2, k, k * 0.4), ui::rgba(0, 0, 0, 90));
     ui::fill_circle(c, ui::rect(cx - k * 0.5, cy - k * 0.5, k, k), if b.t < 45 && (b.t / 6) % 2 == 0 { ui::rgb(120, 25, 25) } else { ui::rgb(22, 22, 30) });
     ui::stroke_circle(c, ui::rect(cx - k * 0.5, cy - k * 0.5, k, k), 3.0, col(b.owner));
@@ -512,6 +625,7 @@ fn draw_player(c: ui::Context, s: State&, i: i64, x: f32, y: f32, t: f32, tm: f3
     }
     if (bits & HOLD) != 0 { ui::stroke_rect(c, ui::rect(x - k * 0.62, y - k * 0.62, k * 1.24, k * 1.24), k * 0.3, 3.0, ui::rgba(255, 255, 255, 190)); }
     ui::fill_circle(c, ui::rect(x - k * 0.5, y + k * 0.3, k, k * 0.4), ui::rgba(0, 0, 0, 110));
+    if i == 1 { draw_goose(c, x, y, k, fx, fy, walk); } else {
     ui::fill_circle(c, ui::rect(x - k * 0.5, y - k * 0.5 + walk, k, k), col(i));
     ui::stroke_circle(c, ui::rect(x - k * 0.5, y - k * 0.5 + walk, k, k), 3.0, ui::rgb(255, 255, 255));
     ui::fill_circle(c, ui::rect(x - k * 0.3, y - k * 0.42 + walk, k * 0.22, k * 0.22), ui::rgba(255, 255, 255, 120));
@@ -520,6 +634,7 @@ fn draw_player(c: ui::Context, s: State&, i: i64, x: f32, y: f32, t: f32, tm: f3
         let ey = y - k * 0.05 + fy * k * 0.1 + walk;
         ui::fill_circle(c, ui::rect(ex - k * 0.13, ey - k * 0.16, k * 0.26, k * 0.32), ui::rgb(255, 255, 255));
         ui::fill_circle(c, ui::rect(ex - k * 0.06 + fx * k * 0.06, ey - k * 0.06 + fy * k * 0.06, k * 0.14, k * 0.14), ui::rgb(20, 20, 30));
+    }
     }
     marker(c, i, x, y - k * 0.78 + walk, t * 0.13);
     if i == s.you {
@@ -553,6 +668,9 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
             }
         }
         for b in s.bombs { draw_bomb(hud, b, ox, oy, t, tm); }
+        for k in 2 {
+            if s.sheep[k].alive != 0 { draw_sheep(hud, s.sheep[k], ox + s.sheep[k].x as f32 / TILE * t, oy + s.sheep[k].y as f32 / TILE * t, t, tm); }
+        }
         for d in fx.dust {
             let a = 1.0 - d.z / 40.0;
             let r = t * (0.05 + 0.05 * a);
@@ -574,6 +692,9 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
             if i == s.you && mode != "solo" { ui::stroke_rect(hud, ui::rect(x - 6.0, 2.0, 112.0, 28.0), 6.0, 2.0, ui::rgb(255, 255, 255)); }
             x += 124.0;
         }
+        var drp: u8[>..] = [];
+        format(drp, "Power-ups ", s.drops, "%");
+        text(hud, size.x - 444.0, 4.0, drp, ui::rgb(200, 205, 220));
         var tag: u8[>..] = [];
         if mode == "solo" { tag.append("SOLO"); } else if mode == "host" { tag.append("HOST"); } else { format(tag, "CLIENT P", s.you + 1); }
         if fx.lost { tag.append("  DISCONNECTED"); }
@@ -634,9 +755,10 @@ fn main() {
     let none = http::MailAddress { .. };
     var addr: http::MailAddress[4] = [none, none, none, none];
     s.players[0].on = 1;
+    s.drops = 33;
     reset_round(s, r);
     if mode == "host" {
-        let cfg = http::Config { port: 8080, workers: 1, mail_slots: 64, mail_size: 512, max_waiting: 16, .. };
+        let cfg = http::Config { port: 8080, workers: 1, mail_slots: 64, mail_size: 1024, max_waiting: 16, .. };
         thread_spawn(server, cfg);
     }
     if mode == "join" {
@@ -651,6 +773,7 @@ fn main() {
     var muted = false;
     let hud = overlay(20.0);
     let big = overlay(72.0);
+    let panel = overlay(18.0);
     let z = float2 { 0.0, 0.0 };
     var shown: float2[4] = [z, z, z, z];
     var fx = Fx { .. };
@@ -664,6 +787,7 @@ fn main() {
         if gfx::key_pressed("M") { muted = !muted; audio::set_voice(tune, if muted { 0.0 } else { 0.2 }, 0.0, 1.0); }
         ui::input_from_gfx(hud);
         ui::input_from_gfx(big);
+        ui::input_from_gfx(panel);
         if frames >= 0 { sleep(0.016); }
         let bits = if frames >= 0 { bot(frame, if mode == "join" { 3 } else { 0 }) } else { keys() };
         acc += if frames >= 0 { 1.0 / 60.0 } else { min(gfx::delta_time(), 0.1) };
@@ -738,15 +862,25 @@ fn main() {
             fx.last[i] = shown[i];
         }
         draw(hud, big, s, shown, fx, mode);
+        if mode != "join" {          // the host sets how often bricks leave power-ups
+            let sz = gfx::screen_size();
+            if ui::begin(panel, "R", ui::rect(sz.x as f32 - 324.0, 5.0, 170.0, 26.0), ui::WINDOW_NO_SCROLLBAR) {
+                ui::layout_row_dynamic(panel, 20.0, 1);
+                s.drops = ui::slide_int(panel, 0, s.drops as i64, 100, 1) as u8;
+            }
+            ui::end(panel);
+        }
         gfx::begin_screen(float4 { 0.06, 0.07, 0.1, 1.0 });
         gfx::end_pass();
         ui::render(hud);
         ui::render(big);
+        ui::render(panel);
         frame += 1;
     }
     for i in 4 { if s.players[i].on != 0 { print("player ", i, " at ", s.players[i].x / TILE, ",", s.players[i].y / TILE, " alive ", s.players[i].alive, " wins ", s.players[i].wins); } }
     ui::destroy(hud);
     ui::destroy(big);
+    ui::destroy(panel);
     audio::close();
     gfx::close();
 }
