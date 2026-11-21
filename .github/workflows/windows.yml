@@ -1,0 +1,41 @@
+name: windows
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Install Goose
+        shell: pwsh
+        run: |
+          curl.exe -fsSL -o goose.zip https://github.com/aardappel/goose/releases/download/v2026.3/goose-v2026.3-windows-x64.zip
+          Expand-Archive goose.zip goosekit
+          $d = (Get-ChildItem goosekit -Recurse -Filter goose.exe | Select-Object -First 1).DirectoryName
+          echo $d >> $env:GITHUB_PATH
+      - name: Install OpenSSL
+        shell: cmd
+        run: '"%VCPKG_INSTALLATION_ROOT%\vcpkg.exe" install openssl:x64-windows'
+      - name: Build
+        shell: cmd
+        run: |
+          set OPENSSL_ROOT_DIR=%VCPKG_INSTALLATION_ROOT%\installed\x64-windows
+          set VCPKG_ROOT=%VCPKG_INSTALLATION_ROOT%
+          call windows\build-windows.bat
+      - name: Package
+        shell: pwsh
+        run: |
+          Copy-Item windows\PLAY.txt dist\
+          Compress-Archive dist\* bomberman-windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bomberman-windows
+          path: bomberman-windows.zip
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create ${{ github.ref_name }} bomberman-windows.zip --title ${{ github.ref_name }} --notes "Windows build: unzip, double-click bomberman.exe"
