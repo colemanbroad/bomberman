@@ -31,8 +31,22 @@ let GHOST = 600;             // ghost power-up length in ticks
 
 // Tile values: 0 empty, 1 wall, 2 brick, 3 range+, 4 bomb+, 5 speed+, 8 ghost, 9 kick, 6 steel crate (two hits), 7 gift crate (always drops),
 // 16+ttl flame, 32+ttl flame over a brick (may drop), 48+ttl flame over a gift (drops).
+let CHAR_GOOSE: u8 = 0;
+let CHAR_SQUIRREL: u8 = 1;
+let CHAR_BABY: u8 = 2;
+let CHAR_COW: u8 = 3;
+let CHAR_PIG: u8 = 4;
+let CHAR_FARMER: u8 = 5;
+
+fn default_kind(slot: i64) -> u8 {
+    if slot == 0 { return CHAR_FARMER; }
+    if slot == 1 { return CHAR_GOOSE; }
+    if slot == 2 { return CHAR_COW; }
+    return CHAR_PIG;
+}
+
 let ROBOTO: const u8[:] = embed_file("Roboto-Regular.ttf");
-struct Player { x: i64, y: i64, on: u8, alive: u8, bombs: u8, range: u8, speed: u8, wins: u8, streak: u8, bits: u8, held: u8, placed: u8, ghost: u16, kick: u8, name: u8[..12] }
+struct Player { x: i64, y: i64, on: u8, alive: u8, bombs: u8, range: u8, speed: u8, wins: u8, streak: u8, bits: u8, held: u8, placed: u8, ghost: u16, kick: u8, kind: u8, name: u8[..12] }
 // dir: 0 still, 1 up, 2 down, 3 left, 4 right (a kicked bomb slides); m: ticks since its last step.
 struct Bomb { x: u8, y: u8, t: u8, range: u8, owner: u8, dir: u8, m: u8 }
 // A sheep wanders at random and blocks the way like a movable block. dir: 0 up, 1 down, 2 left, 3 right, 4 grazing.
@@ -48,9 +62,9 @@ extern fn udp_recv(fd: i64, b: u8[:], from: i64&) -> i64;
 
 // Host: input or profile update from a connection (reply names it). Client: key bits or profile to send.
 // seq numbers a client's input steps; the host echoes the latest one it has seen in State.ack.
-struct Msg { reply: http::MailAddress, bits: u8, leave: bool, seq: i64, is_profile: bool, name: u8[..12] }
+struct Msg { reply: http::MailAddress, bits: u8, leave: bool, seq: i64, is_profile: bool, kind: u8, name: u8[..12] }
 struct Pad { bits: u8, seq: i64 }
-struct Profile { name: u8[..12] }
+struct Profile { kind: u8, name: u8[..12] }
 struct Lost { code: i64 }
 
 fn player_name(s: State&, i: i64, out: u8[>..]&) {
@@ -357,16 +371,17 @@ fn serve_event(ev: http::Event, st: Conn&, out: http::Reply) {
     } else if ev.kind == http::TIMEOUT {
         http::later(out, 5000);
     } else {
-        if ev.kind == http::CLOSED && st.reply.key != 0 { qput(Msg { st.reply, 0, true, 0, false, [] }); }
+        if ev.kind == http::CLOSED && st.reply.key != 0 { qput(Msg { st.reply, 0, true, 0, false, 0, [] }); }
         http::ws_read(ev, st.ws, out) { op, data, o =>
             if st.reply.key == 0 { st.reply = http::later(o, 5000); }
-            if data.len >= 2 && data[0] == 255 {
+            if data.len >= 3 && data[0] == 255 {
+                let kd = if data[1] <= 5 { data[1] } else { 0 as u8 };
                 var nm: u8[..12] = [];
-                let ln = min(data[1] as i64, min(12, data.len - 2));
-                for k in ln { nm.push(data[2 + k]); }
-                qput(Msg { st.reply, 0, false, 0, true, nm });
+                let ln = min(data[2] as i64, min(12, data.len - 3));
+                for k in ln { nm.push(data[3 + k]); }
+                qput(Msg { st.reply, 0, false, 0, true, kd, nm });
             } else if data.len >= 3 {
-                qput(Msg { st.reply, data[0], false, (data[1] as i64) | ((data[2] as i64) << 8), false, [] });
+                qput(Msg { st.reply, data[0], false, (data[1] as i64) | ((data[2] as i64) << 8), false, 0, [] });
             }
         };
     }
@@ -395,6 +410,7 @@ thread_fn client(url: u8[..64]) {
         if prof_ok {
             var pkt: u8[>..] = [];
             pkt.push(255);
+            pkt.push(prof.kind);
             pkt.push(prof.name.len as u8);
             for k in prof.name.len { pkt.push(prof.name[k]); }
             guard http::ws_client_binary(conn, pkt).code == 0 else { break; }
@@ -711,7 +727,7 @@ fn draw_flame(c: ui::Context, g: u8, x: f32, y: f32, t: f32, tm: f32) {
     ui::fill_rect(c, ui::rect(x + t * 0.28, y + t * 0.28, t * 0.44, t * 0.44), t * 0.2, ui::rgba(255, 245, 190, a));
 }
 
-// Player 2 is a goose, and her bombs are eggs.
+// Themed bombs for each farm character: egg, acorn, diaper, cow patty, bacon, hay bale.
 fn draw_egg(c: ui::Context, b: Bomb, cx: f32, cy: f32, k: f32, tm: f32) {
     let w = k * 0.62;
     let h = k * 0.8;
@@ -724,20 +740,118 @@ fn draw_egg(c: ui::Context, b: Bomb, cx: f32, cy: f32, k: f32, tm: f32) {
     ui::fill_circle(c, ui::rect(x + w * 0.1, cy + h * 0.05, w * 0.12, w * 0.12), ui::rgba(190, 160, 120, 170));
     ui::fill_circle(c, ui::rect(x - w * 0.25, cy + h * 0.2, w * 0.1, w * 0.1), ui::rgba(190, 160, 120, 170));
     ui::fill_circle(c, ui::rect(x - w * 0.3, cy - h * 0.3, w * 0.22, w * 0.3), ui::rgba(255, 255, 255, 170));
-    if b.t < 45 {        // about to hatch with a bang
+    if b.t < 45 {
         ui::stroke_line(c, x - w * 0.4, cy - h * 0.05, x - w * 0.1, cy + h * 0.1, 2.0, ui::rgb(90, 70, 60));
         ui::stroke_line(c, x - w * 0.1, cy + h * 0.1, x + w * 0.1, cy - h * 0.08, 2.0, ui::rgb(90, 70, 60));
         ui::stroke_line(c, x + w * 0.1, cy - h * 0.08, x + w * 0.4, cy + h * 0.08, 2.0, ui::rgb(90, 70, 60));
     }
 }
 
-fn draw_goose(c: ui::Context, x: f32, y: f32, k: f32, fx: f32, fy: f32, walk: f32) {
+fn draw_acorn(c: ui::Context, b: Bomb, cx: f32, cy: f32, k: f32, tm: f32) {
+    let red = b.t < 45 && (b.t / 6) % 2 == 0;
+    let nut = if red { ui::rgb(210, 70, 45) } else { ui::rgb(176, 112, 54) };
+    let cap = if red { ui::rgb(140, 40, 25) } else { ui::rgb(102, 62, 34) };
+    ui::fill_circle(c, ui::rect(cx - k * 0.42, cy + k * 0.22, k * 0.84, k * 0.3), ui::rgba(0, 0, 0, 90));
+    // Nut body + bottom tip
+    ui::fill_circle(c, ui::rect(cx - k * 0.32, cy - k * 0.18, k * 0.64, k * 0.6), nut);
+    ui::fill_triangle(c, cx - k * 0.2, cy + k * 0.28, cx + k * 0.2, cy + k * 0.28, cx, cy + k * 0.5, nut);
+    ui::stroke_circle(c, ui::rect(cx - k * 0.32, cy - k * 0.18, k * 0.64, k * 0.6), 2.5, col(b.owner));
+    ui::fill_circle(c, ui::rect(cx - k * 0.18, cy - k * 0.04, k * 0.14, k * 0.22), ui::rgba(255, 235, 195, 130));
+    // Cap + stem
+    ui::fill_rect(c, ui::rect(cx - k * 0.38, cy - k * 0.42, k * 0.76, k * 0.3), k * 0.14, cap);
+    ui::stroke_rect(c, ui::rect(cx - k * 0.38, cy - k * 0.42, k * 0.76, k * 0.3), k * 0.14, 2.0, ui::rgb(68, 38, 18));
+    ui::stroke_line(c, cx, cy - k * 0.42, cx + k * 0.12, cy - k * 0.62, 3.0, ui::rgb(90, 56, 30));
+    let sp = (0.09 + 0.04 * sin(tm * 26.0)) * k;
+    ui::fill_circle(c, ui::rect(cx + k * 0.12 - sp, cy - k * 0.62 - sp, sp * 2.0, sp * 2.0), ui::rgb(255, 220, 75));
+}
+
+fn draw_diaper(c: ui::Context, b: Bomb, cx: f32, cy: f32, k: f32, tm: f32) {
+    let red = b.t < 45 && (b.t / 6) % 2 == 0;
+    let cloth = if red { ui::rgb(255, 200, 175) } else { ui::rgb(248, 250, 255) };
+    let trim = ui::rgb(175, 210, 245);
+    ui::fill_circle(c, ui::rect(cx - k * 0.44, cy + k * 0.22, k * 0.88, k * 0.3), ui::rgba(0, 0, 0, 90));
+    // Folded diaper shape
+    ui::fill_rect(c, ui::rect(cx - k * 0.42, cy - k * 0.34, k * 0.84, k * 0.28), k * 0.08, cloth);
+    ui::fill_triangle(c, cx - k * 0.42, cy - k * 0.14, cx + k * 0.42, cy - k * 0.14, cx, cy + k * 0.44, cloth);
+    ui::fill_circle(c, ui::rect(cx - k * 0.24, cy + k * 0.12, k * 0.48, k * 0.3), cloth);
+    ui::stroke_rect(c, ui::rect(cx - k * 0.42, cy - k * 0.34, k * 0.84, k * 0.28), k * 0.08, 2.5, col(b.owner));
+    ui::stroke_line(c, cx - k * 0.4, cy - k * 0.06, cx, cy + k * 0.42, 2.5, trim);
+    ui::stroke_line(c, cx + k * 0.4, cy - k * 0.06, cx, cy + k * 0.42, 2.5, trim);
+    // Gold safety pins
+    ui::fill_circle(c, ui::rect(cx - k * 0.34, cy - k * 0.25, k * 0.12, k * 0.12), ui::rgb(245, 195, 50));
+    ui::fill_circle(c, ui::rect(cx + k * 0.22, cy - k * 0.25, k * 0.12, k * 0.12), ui::rgb(245, 195, 50));
+    // Stink lines waving up!
+    let sw = sin(tm * 10.0 + b.t) * k * 0.08;
+    let stink = if red { ui::rgb(255, 110, 60) } else { ui::rgb(135, 205, 75) };
+    ui::stroke_line(c, cx - k * 0.15, cy - k * 0.4, cx - k * 0.15 + sw, cy - k * 0.65, 2.5, stink);
+    ui::stroke_line(c, cx + k * 0.15, cy - k * 0.4, cx + k * 0.15 - sw, cy - k * 0.65, 2.5, stink);
+}
+
+fn draw_patty(c: ui::Context, b: Bomb, cx: f32, cy: f32, k: f32, tm: f32) {
+    let red = b.t < 45 && (b.t / 6) % 2 == 0;
+    let d1 = if red { ui::rgb(180, 55, 35) } else { ui::rgb(104, 66, 36) };
+    let d2 = if red { ui::rgb(210, 80, 45) } else { ui::rgb(126, 82, 46) };
+    let d3 = if red { ui::rgb(240, 110, 60) } else { ui::rgb(148, 98, 56) };
+    ui::fill_circle(c, ui::rect(cx - k * 0.5, cy + k * 0.18, k, k * 0.34), ui::rgba(0, 0, 0, 95));
+    // Three swirly stacked cow patty tiers
+    ui::fill_circle(c, ui::rect(cx - k * 0.46, cy - k * 0.04, k * 0.92, k * 0.46), d1);
+    ui::stroke_circle(c, ui::rect(cx - k * 0.46, cy - k * 0.04, k * 0.92, k * 0.46), 2.5, col(b.owner));
+    ui::fill_circle(c, ui::rect(cx - k * 0.34, cy - k * 0.24, k * 0.68, k * 0.38), d2);
+    ui::fill_circle(c, ui::rect(cx - k * 0.18, cy - k * 0.4, k * 0.36, k * 0.26), d3);
+    ui::fill_triangle(c, cx - k * 0.12, cy - k * 0.34, cx + k * 0.12, cy - k * 0.34, cx + k * 0.04, cy - k * 0.54, d3);
+    // Buzzing fly & stink steam
+    let fx = cx + cos(tm * 9.0 + b.t) * k * 0.38;
+    let fy = cy - k * 0.48 + sin(tm * 13.0) * k * 0.12;
+    ui::fill_circle(c, ui::rect(fx - 3.0, fy - 3.0, 6.0, 6.0), ui::rgb(30, 30, 35));
+    ui::stroke_line(c, cx - k * 0.14, cy - k * 0.45, cx - k * 0.2 + sin(tm * 8.0) * k * 0.06, cy - k * 0.66, 2.0, ui::rgba(160, 210, 90, 200));
+}
+
+fn draw_bacon(c: ui::Context, b: Bomb, cx: f32, cy: f32, k: f32, tm: f32) {
+    let red = b.t < 45 && (b.t / 6) % 2 == 0;
+    let meat = if red { ui::rgb(255, 70, 50) } else { ui::rgb(198, 54, 48) };
+    let fat = if red { ui::rgb(255, 225, 190) } else { ui::rgb(250, 222, 204) };
+    let w = k * 0.84;
+    let h = k * 0.5;
+    let wy = sin(tm * 12.0 + b.t) * k * 0.04;
+    ui::fill_circle(c, ui::rect(cx - k * 0.46, cy + k * 0.2, k * 0.92, k * 0.3), ui::rgba(0, 0, 0, 90));
+    ui::fill_rect(c, ui::rect(cx - w * 0.5, cy - h * 0.5 + wy, w, h), h * 0.32, meat);
+    ui::stroke_rect(c, ui::rect(cx - w * 0.5, cy - h * 0.5 + wy, w, h), h * 0.32, 2.5, col(b.owner));
+    // Wavy marbled fat stripes
+    ui::fill_rect(c, ui::rect(cx - w * 0.44, cy - h * 0.24 + wy, w * 0.88, h * 0.16), 3.0, fat);
+    ui::fill_rect(c, ui::rect(cx - w * 0.44, cy + h * 0.08 + wy, w * 0.88, h * 0.16), 3.0, fat);
+    // Sizzle sparks
+    let sp = (0.08 + 0.04 * sin(tm * 28.0)) * k;
+    ui::fill_circle(c, ui::rect(cx - w * 0.25 - sp, cy - h * 0.72 - sp, sp * 2.0, sp * 2.0), ui::rgb(255, 225, 90));
+    ui::fill_circle(c, ui::rect(cx + w * 0.22 - sp * 0.7, cy - h * 0.62 - sp * 0.7, sp * 1.4, sp * 1.4), ui::rgb(255, 180, 60));
+}
+
+fn draw_haybale(c: ui::Context, b: Bomb, cx: f32, cy: f32, k: f32, tm: f32) {
+    let red = b.t < 45 && (b.t / 6) % 2 == 0;
+    let hay = if red { ui::rgb(245, 130, 55) } else { ui::rgb(232, 192, 72) };
+    let hi = if red { ui::rgb(255, 185, 95) } else { ui::rgb(250, 218, 110) };
+    let twine = ui::rgb(138, 86, 36);
+    let w = k * 0.84;
+    let h = k * 0.62;
+    ui::fill_circle(c, ui::rect(cx - k * 0.46, cy + k * 0.22, k * 0.92, k * 0.3), ui::rgba(0, 0, 0, 90));
+    ui::fill_rect(c, ui::rect(cx - w * 0.5, cy - h * 0.5, w, h), 5.0, hay);
+    ui::fill_rect(c, ui::rect(cx - w * 0.46, cy - h * 0.46, w * 0.92, h * 0.2), 3.0, hi);
+    ui::stroke_rect(c, ui::rect(cx - w * 0.5, cy - h * 0.5, w, h), 5.0, 2.5, col(b.owner));
+    // Twine straps & straw wisps
+    ui::fill_rect(c, ui::rect(cx - w * 0.26, cy - h * 0.5, w * 0.1, h), 0.0, twine);
+    ui::fill_rect(c, ui::rect(cx + w * 0.16, cy - h * 0.5, w * 0.1, h), 0.0, twine);
+    ui::stroke_line(c, cx - w * 0.5, cy - h * 0.15, cx - w * 0.62, cy - h * 0.24, 2.0, hi);
+    ui::stroke_line(c, cx + w * 0.5, cy + h * 0.1, cx + w * 0.62, cy + h * 0.02, 2.0, hi);
+    let sp = (0.09 + 0.04 * sin(tm * 24.0)) * k;
+    ui::fill_circle(c, ui::rect(cx - sp, cy - h * 0.66 - sp, sp * 2.0, sp * 2.0), ui::rgb(255, 215, 70));
+}
+
+fn draw_goose(c: ui::Context, owner: i64, x: f32, y: f32, k: f32, fx: f32, fy: f32, walk: f32) {
     let orange = ui::rgb(255, 150, 30);
     let sw = 0.06 * k * sin(walk * 40.0 / k);
     ui::fill_circle(c, ui::rect(x - k * 0.28 + sw, y + k * 0.36, k * 0.22, k * 0.14), orange);
     ui::fill_circle(c, ui::rect(x + k * 0.06 - sw, y + k * 0.36, k * 0.22, k * 0.14), orange);
     ui::fill_circle(c, ui::rect(x - k * 0.5, y - k * 0.4 + walk, k, k * 0.95), ui::rgb(250, 250, 252));
-    ui::stroke_circle(c, ui::rect(x - k * 0.5, y - k * 0.4 + walk, k, k * 0.95), 3.0, col(1));
+    ui::stroke_circle(c, ui::rect(x - k * 0.5, y - k * 0.4 + walk, k, k * 0.95), 3.0, col(owner));
     ui::fill_circle(c, ui::rect(x - k * 0.46, y - k * 0.05 + walk, k * 0.28, k * 0.5), ui::rgb(205, 215, 235));
     ui::fill_circle(c, ui::rect(x + k * 0.18, y - k * 0.05 + walk, k * 0.28, k * 0.5), ui::rgb(205, 215, 235));
     let hx = x + fx * k * 0.2;
@@ -754,6 +868,151 @@ fn draw_goose(c: ui::Context, x: f32, y: f32, k: f32, fx: f32, fy: f32, walk: f3
             ui::fill_circle(c, ui::rect(ex - k * 0.04, hy - k * 0.06, k * 0.08, k * 0.1), ui::rgb(20, 20, 30));
         }
     }
+}
+
+fn draw_squirrel(c: ui::Context, owner: i64, x: f32, y: f32, k: f32, fx: f32, fy: f32, walk: f32) {
+    let fur = ui::rgb(172, 98, 46);
+    let tail = ui::rgb(142, 74, 30);
+    let belly = ui::rgb(240, 214, 178);
+    // Big bushy curled tail behind the squirrel
+    let tx = x - fx * k * 0.36 + (if fx == 0.0 { k * 0.34 } else { 0.0 });
+    ui::fill_circle(c, ui::rect(tx - k * 0.26, y - k * 0.48 + walk, k * 0.52, k * 0.68), tail);
+    ui::fill_circle(c, ui::rect(tx - k * 0.18, y - k * 0.56 + walk, k * 0.38, k * 0.38), fur);
+    // Body & belly
+    ui::fill_circle(c, ui::rect(x - k * 0.44, y - k * 0.36 + walk, k * 0.88, k * 0.86), fur);
+    ui::stroke_circle(c, ui::rect(x - k * 0.44, y - k * 0.36 + walk, k * 0.88, k * 0.86), 3.0, col(owner));
+    ui::fill_circle(c, ui::rect(x - k * 0.24, y - k * 0.04 + walk, k * 0.48, k * 0.48), belly);
+    // Pointy ears
+    ui::fill_circle(c, ui::rect(x - k * 0.34, y - k * 0.54 + walk, k * 0.22, k * 0.28), fur);
+    ui::fill_circle(c, ui::rect(x + k * 0.12, y - k * 0.54 + walk, k * 0.22, k * 0.28), fur);
+    ui::fill_circle(c, ui::rect(x - k * 0.29, y - k * 0.48 + walk, k * 0.12, k * 0.16), ui::rgb(235, 175, 165));
+    ui::fill_circle(c, ui::rect(x + k * 0.17, y - k * 0.48 + walk, k * 0.12, k * 0.16), ui::rgb(235, 175, 165));
+    // Face
+    if fy >= 0.0 {
+        for e in 2 {
+            let ex = x + (if e == 0 { -1.0 } else { 1.0 }) * k * 0.16 + fx * k * 0.08;
+            let ey = y - k * 0.18 + fy * k * 0.06 + walk;
+            ui::fill_circle(c, ui::rect(ex - k * 0.08, ey - k * 0.09, k * 0.16, k * 0.18), ui::rgb(255, 255, 255));
+            ui::fill_circle(c, ui::rect(ex - k * 0.04 + fx * k * 0.03, ey - k * 0.04, k * 0.09, k * 0.09), ui::rgb(20, 20, 28));
+        }
+        // Cute nose + buck tooth
+        let nx = x + fx * k * 0.12;
+        ui::fill_circle(c, ui::rect(nx - k * 0.06, y - k * 0.06 + walk, k * 0.12, k * 0.09), ui::rgb(50, 30, 24));
+        ui::fill_rect(c, ui::rect(nx - k * 0.05, y + k * 0.02 + walk, k * 0.1, k * 0.09), 1.0, ui::rgb(255, 255, 255));
+    }
+}
+
+fn draw_baby(c: ui::Context, owner: i64, x: f32, y: f32, k: f32, fx: f32, fy: f32, walk: f32) {
+    let skin = ui::rgb(255, 218, 190);
+    // Onesie body in player color
+    ui::fill_circle(c, ui::rect(x - k * 0.42, y - k * 0.1 + walk, k * 0.84, k * 0.62), col(owner));
+    ui::stroke_circle(c, ui::rect(x - k * 0.42, y - k * 0.1 + walk, k * 0.84, k * 0.62), 2.5, ui::rgb(255, 255, 255));
+    // Big chubby baby head
+    ui::fill_circle(c, ui::rect(x - k * 0.42, y - k * 0.56 + walk, k * 0.84, k * 0.74), skin);
+    ui::stroke_circle(c, ui::rect(x - k * 0.42, y - k * 0.56 + walk, k * 0.84, k * 0.74), 2.5, col(owner));
+    // Little hair curl on top
+    ui::stroke_line(c, x, y - k * 0.56 + walk, x + k * 0.1, y - k * 0.7 + walk, 3.0, ui::rgb(130, 82, 42));
+    ui::fill_circle(c, ui::rect(x - k * 0.04, y - k * 0.72 + walk, k * 0.14, k * 0.12), ui::rgb(130, 82, 42));
+    if fy >= 0.0 {
+        // Rosy cheeks + big eyes
+        ui::fill_circle(c, ui::rect(x - k * 0.34, y - k * 0.14 + walk, k * 0.16, k * 0.12), ui::rgba(255, 130, 145, 150));
+        ui::fill_circle(c, ui::rect(x + k * 0.18, y - k * 0.14 + walk, k * 0.16, k * 0.12), ui::rgba(255, 130, 145, 150));
+        for e in 2 {
+            let ex = x + (if e == 0 { -1.0 } else { 1.0 }) * k * 0.16 + fx * k * 0.08;
+            let ey = y - k * 0.26 + walk;
+            ui::fill_circle(c, ui::rect(ex - k * 0.09, ey - k * 0.1, k * 0.18, k * 0.2), ui::rgb(255, 255, 255));
+            ui::fill_circle(c, ui::rect(ex - k * 0.05 + fx * k * 0.03, ey - k * 0.05, k * 0.11, k * 0.11), ui::rgb(24, 24, 34));
+        }
+        // Pacifier
+        let px = x + fx * k * 0.1;
+        ui::fill_circle(c, ui::rect(px - k * 0.13, y - k * 0.08 + walk, k * 0.26, k * 0.18), ui::rgb(95, 195, 255));
+        ui::fill_circle(c, ui::rect(px - k * 0.06, y - k * 0.04 + walk, k * 0.12, k * 0.1), ui::rgb(255, 225, 80));
+    }
+}
+
+fn draw_cow(c: ui::Context, owner: i64, x: f32, y: f32, k: f32, fx: f32, fy: f32, walk: f32) {
+    let white = ui::rgb(248, 248, 250);
+    let spot = ui::rgb(40, 40, 48);
+    // Horns & ears
+    ui::fill_triangle(c, x - k * 0.34, y - k * 0.34 + walk, x - k * 0.18, y - k * 0.44 + walk, x - k * 0.42, y - k * 0.64 + walk, ui::rgb(225, 200, 140));
+    ui::fill_triangle(c, x + k * 0.34, y - k * 0.34 + walk, x + k * 0.18, y - k * 0.44 + walk, x + k * 0.42, y - k * 0.64 + walk, ui::rgb(225, 200, 140));
+    ui::fill_circle(c, ui::rect(x - k * 0.56, y - k * 0.32 + walk, k * 0.22, k * 0.14), spot);
+    ui::fill_circle(c, ui::rect(x + k * 0.34, y - k * 0.32 + walk, k * 0.22, k * 0.14), white);
+    // Round spotted body
+    ui::fill_circle(c, ui::rect(x - k * 0.48, y - k * 0.46 + walk, k * 0.96, k * 0.96), white);
+    ui::fill_circle(c, ui::rect(x - k * 0.38, y - k * 0.34 + walk, k * 0.34, k * 0.32), spot);
+    ui::fill_circle(c, ui::rect(x + k * 0.08, y - k * 0.14 + walk, k * 0.28, k * 0.3), spot);
+    ui::stroke_circle(c, ui::rect(x - k * 0.48, y - k * 0.46 + walk, k * 0.96, k * 0.96), 3.0, col(owner));
+    if fy >= 0.0 {
+        for e in 2 {
+            let ex = x + (if e == 0 { -1.0 } else { 1.0 }) * k * 0.18 + fx * k * 0.06;
+            let ey = y - k * 0.22 + walk;
+            ui::fill_circle(c, ui::rect(ex - k * 0.07, ey - k * 0.08, k * 0.14, k * 0.16), ui::rgb(255, 255, 255));
+            ui::fill_circle(c, ui::rect(ex - k * 0.04 + fx * k * 0.03, ey - k * 0.04, k * 0.08, k * 0.08), ui::rgb(20, 20, 25));
+        }
+        // Wide pink snout
+        let sx = x + fx * k * 0.08;
+        ui::fill_rect(c, ui::rect(sx - k * 0.32, y - k * 0.02 + walk, k * 0.64, k * 0.32), k * 0.14, ui::rgb(245, 168, 182));
+        ui::fill_circle(c, ui::rect(sx - k * 0.18, y + k * 0.08 + walk, k * 0.09, k * 0.11), ui::rgb(110, 52, 66));
+        ui::fill_circle(c, ui::rect(sx + k * 0.09, y + k * 0.08 + walk, k * 0.09, k * 0.11), ui::rgb(110, 52, 66));
+    }
+}
+
+fn draw_pig(c: ui::Context, owner: i64, x: f32, y: f32, k: f32, fx: f32, fy: f32, walk: f32) {
+    let pink = ui::rgb(250, 162, 182);
+    let snout = ui::rgb(238, 122, 152);
+    // Floppy ears
+    ui::fill_triangle(c, x - k * 0.44, y - k * 0.26 + walk, x - k * 0.16, y - k * 0.44 + walk, x - k * 0.44, y - k * 0.62 + walk, snout);
+    ui::fill_triangle(c, x + k * 0.44, y - k * 0.26 + walk, x + k * 0.16, y - k * 0.44 + walk, x + k * 0.44, y - k * 0.62 + walk, snout);
+    // Chubby pink body
+    ui::fill_circle(c, ui::rect(x - k * 0.48, y - k * 0.46 + walk, k * 0.96, k * 0.96), pink);
+    ui::stroke_circle(c, ui::rect(x - k * 0.48, y - k * 0.46 + walk, k * 0.96, k * 0.96), 3.0, col(owner));
+    if fy >= 0.0 {
+        for e in 2 {
+            let ex = x + (if e == 0 { -1.0 } else { 1.0 }) * k * 0.19 + fx * k * 0.07;
+            let ey = y - k * 0.22 + walk;
+            ui::fill_circle(c, ui::rect(ex - k * 0.07, ey - k * 0.08, k * 0.14, k * 0.16), ui::rgb(255, 255, 255));
+            ui::fill_circle(c, ui::rect(ex - k * 0.04 + fx * k * 0.03, ey - k * 0.04, k * 0.08, k * 0.08), ui::rgb(25, 20, 28));
+        }
+        // Oval snout with nostrils
+        let sx = x + fx * k * 0.1;
+        ui::fill_rect(c, ui::rect(sx - k * 0.24, y - k * 0.04 + walk, k * 0.48, k * 0.3), k * 0.15, snout);
+        ui::fill_circle(c, ui::rect(sx - k * 0.13, y + k * 0.06 + walk, k * 0.09, k * 0.12), ui::rgb(120, 42, 64));
+        ui::fill_circle(c, ui::rect(sx + k * 0.04, y + k * 0.06 + walk, k * 0.09, k * 0.12), ui::rgb(120, 42, 64));
+    } else {
+        // Curly tail visible from behind
+        ui::stroke_circle(c, ui::rect(x - k * 0.1, y + k * 0.08 + walk, k * 0.2, k * 0.2), 2.5, snout);
+    }
+}
+
+fn draw_farmer(c: ui::Context, owner: i64, x: f32, y: f32, k: f32, fx: f32, fy: f32, walk: f32) {
+    let skin = ui::rgb(248, 204, 166);
+    let denim = ui::rgb(52, 96, 168);
+    let straw = ui::rgb(240, 204, 96);
+    // Shirt (player color) + denim overalls
+    ui::fill_circle(c, ui::rect(x - k * 0.44, y - k * 0.12 + walk, k * 0.88, k * 0.64), col(owner));
+    ui::fill_rect(c, ui::rect(x - k * 0.3, y + k * 0.02 + walk, k * 0.6, k * 0.46), k * 0.14, denim);
+    ui::fill_rect(c, ui::rect(x - k * 0.28, y - k * 0.08 + walk, k * 0.11, k * 0.22), 0.0, denim);
+    ui::fill_rect(c, ui::rect(x + k * 0.17, y - k * 0.08 + walk, k * 0.11, k * 0.22), 0.0, denim);
+    ui::fill_circle(c, ui::rect(x - k * 0.25, y + k * 0.04 + walk, k * 0.07, k * 0.07), ui::rgb(245, 205, 65));
+    ui::fill_circle(c, ui::rect(x + k * 0.18, y + k * 0.04 + walk, k * 0.07, k * 0.07), ui::rgb(245, 205, 65));
+    // Face
+    ui::fill_circle(c, ui::rect(x - k * 0.32, y - k * 0.48 + walk, k * 0.64, k * 0.54), skin);
+    if fy >= 0.0 {
+        for e in 2 {
+            let ex = x + (if e == 0 { -1.0 } else { 1.0 }) * k * 0.12 + fx * k * 0.06;
+            let ey = y - k * 0.24 + walk;
+            ui::fill_circle(c, ui::rect(ex - k * 0.05, ey - k * 0.06, k * 0.1, k * 0.11), ui::rgb(25, 22, 24));
+        }
+        // Mustache
+        let mx = x + fx * k * 0.07;
+        ui::fill_rect(c, ui::rect(mx - k * 0.18, y - k * 0.1 + walk, k * 0.36, k * 0.1), k * 0.05, ui::rgb(122, 74, 38));
+    }
+    // Wide straw hat with player-colored ribbon
+    ui::fill_circle(c, ui::rect(x - k * 0.56, y - k * 0.52 + walk, k * 1.12, k * 0.24), straw);
+    ui::stroke_circle(c, ui::rect(x - k * 0.56, y - k * 0.52 + walk, k * 1.12, k * 0.24), 2.0, ui::rgb(180, 140, 48));
+    ui::fill_rect(c, ui::rect(x - k * 0.3, y - k * 0.68 + walk, k * 0.6, k * 0.26), k * 0.12, straw);
+    ui::fill_rect(c, ui::rect(x - k * 0.3, y - k * 0.5 + walk, k * 0.6, k * 0.08), 0.0, col(owner));
 }
 
 fn draw_sheep(c: ui::Context, q: Sheep, x: f32, y: f32, t: f32, tm: f32) {
@@ -777,7 +1036,7 @@ fn draw_sheep(c: ui::Context, q: Sheep, x: f32, y: f32, t: f32, tm: f32) {
     ui::fill_circle(c, ui::rect(x - k * 0.2, y - k * 0.32 + bob, k * 0.4, k * 0.26), wool);
 }
 
-fn draw_bomb(c: ui::Context, b: Bomb, ox: f32, oy: f32, t: f32, tm: f32) {
+fn draw_bomb(c: ui::Context, s: State&, b: Bomb, ox: f32, oy: f32, t: f32, tm: f32) {
     let k = (0.72 + 0.06 * sin(tm * 10.0 + b.t)) * t;
     var cx = ox + (b.x + 0.5) * t;
     var cy = oy + (b.y + 0.5) * t;
@@ -785,27 +1044,25 @@ fn draw_bomb(c: ui::Context, b: Bomb, ox: f32, oy: f32, t: f32, tm: f32) {
         let sl = (1.0 - (b.m as f32) / SLIDE) * t;
         if b.dir == 1 { cy += sl; } else if b.dir == 2 { cy -= sl; } else if b.dir == 3 { cx += sl; } else { cx -= sl; }
     }
-    if b.owner == 1 { draw_egg(c, b, cx, cy, k, tm); return; }
+    let kd = s.players[b.owner].kind;
+    if kd == CHAR_GOOSE { draw_egg(c, b, cx, cy, k, tm); return; }
+    if kd == CHAR_SQUIRREL { draw_acorn(c, b, cx, cy, k, tm); return; }
+    if kd == CHAR_BABY { draw_diaper(c, b, cx, cy, k, tm); return; }
+    if kd == CHAR_COW { draw_patty(c, b, cx, cy, k, tm); return; }
+    if kd == CHAR_PIG { draw_bacon(c, b, cx, cy, k, tm); return; }
+    if kd == CHAR_FARMER { draw_haybale(c, b, cx, cy, k, tm); return; }
     ui::fill_circle(c, ui::rect(cx - k * 0.5, cy + k * 0.2, k, k * 0.4), ui::rgba(0, 0, 0, 90));
     ui::fill_circle(c, ui::rect(cx - k * 0.5, cy - k * 0.5, k, k), if b.t < 45 && (b.t / 6) % 2 == 0 { ui::rgb(120, 25, 25) } else { ui::rgb(22, 22, 30) });
     ui::stroke_circle(c, ui::rect(cx - k * 0.5, cy - k * 0.5, k, k), 3.0, col(b.owner));
-    ui::fill_circle(c, ui::rect(cx - k * 0.3, cy - k * 0.32, k * 0.2, k * 0.2), ui::rgba(255, 255, 255, 170));
-    ui::stroke_line(c, cx + k * 0.25, cy - k * 0.42, cx + k * 0.4, cy - k * 0.68, 2.5, ui::rgb(230, 200, 140));
-    let sp = (0.12 + 0.05 * sin(tm * 30.0)) * t;
-    ui::fill_circle(c, ui::rect(cx + k * 0.4 - sp, cy - k * 0.68 - sp, sp * 2.0, sp * 2.0), ui::rgb(255, 220, 80));
 }
 
-fn draw_character(c: ui::Context, i: i64, x: f32, y: f32, k: f32, fx: f32, fy: f32, walk: f32) {
-    if i == 1 { draw_goose(c, x, y, k, fx, fy, walk); return; }
-    ui::fill_circle(c, ui::rect(x - k * 0.5, y - k * 0.5 + walk, k, k), col(i));
-    ui::stroke_circle(c, ui::rect(x - k * 0.5, y - k * 0.5 + walk, k, k), 3.0, ui::rgb(255, 255, 255));
-    ui::fill_circle(c, ui::rect(x - k * 0.3, y - k * 0.42 + walk, k * 0.22, k * 0.22), ui::rgba(255, 255, 255, 120));
-    for e in 2 {
-        let ex = x + (if e == 0 { -1.0 } else { 1.0 }) * k * 0.2 + fx * k * 0.1;
-        let ey = y - k * 0.05 + fy * k * 0.1 + walk;
-        ui::fill_circle(c, ui::rect(ex - k * 0.13, ey - k * 0.16, k * 0.26, k * 0.32), ui::rgb(255, 255, 255));
-        ui::fill_circle(c, ui::rect(ex - k * 0.06 + fx * k * 0.06, ey - k * 0.06 + fy * k * 0.06, k * 0.14, k * 0.14), ui::rgb(20, 20, 30));
-    }
+fn draw_character(c: ui::Context, kind: u8, owner: i64, x: f32, y: f32, k: f32, fx: f32, fy: f32, walk: f32) {
+    if kind == CHAR_GOOSE { draw_goose(c, owner, x, y, k, fx, fy, walk); return; }
+    if kind == CHAR_SQUIRREL { draw_squirrel(c, owner, x, y, k, fx, fy, walk); return; }
+    if kind == CHAR_BABY { draw_baby(c, owner, x, y, k, fx, fy, walk); return; }
+    if kind == CHAR_COW { draw_cow(c, owner, x, y, k, fx, fy, walk); return; }
+    if kind == CHAR_PIG { draw_pig(c, owner, x, y, k, fx, fy, walk); return; }
+    draw_farmer(c, owner, x, y, k, fx, fy, walk);
 }
 
 fn draw_player(c: ui::Context, s: State&, i: i64, x: f32, y: f32, t: f32, tm: f32) {
@@ -828,7 +1085,7 @@ fn draw_player(c: ui::Context, s: State&, i: i64, x: f32, y: f32, t: f32, tm: f3
     }
     if (bits & HOLD) != 0 { ui::stroke_rect(c, ui::rect(x - k * 0.62, y - k * 0.62, k * 1.24, k * 1.24), k * 0.3, 3.0, ui::rgba(255, 255, 255, 190)); }
     ui::fill_circle(c, ui::rect(x - k * 0.5, y + k * 0.3, k, k * 0.4), ui::rgba(0, 0, 0, 110));
-    draw_character(c, i, x, y, k, fx, fy, walk);
+    draw_character(c, s.players[i].kind, i, x, y, k, fx, fy, walk);
     marker(c, i, x, y - k * 0.78 + walk, t * 0.13);
     if s.players[i].name.len > 0 {
         let nw = ui::text_width(ui::font(c), s.players[i].name[..]);
@@ -879,7 +1136,7 @@ fn draw_dance(c: ui::Context, s: State&, who: i64, size: int2, tm: f32) {
     let arm_r = -arm_l;
     ui::stroke_line(c, dx - k * 0.44, dy, dx - k * 0.78, dy - k * 0.2 + arm_l, 8.0, ui::rgb(255, 255, 255));
     ui::stroke_line(c, dx + k * 0.44, dy, dx + k * 0.78, dy - k * 0.2 + arm_r, 8.0, ui::rgb(255, 255, 255));
-    draw_character(c, who, dx, dy, k, fx, fy, sin(beat * 2.0) * k * 0.04);
+    draw_character(c, s.players[who].kind, who, dx, dy, k, fx, fy, sin(beat * 2.0) * k * 0.04);
     // Golden crown bouncing on top
     let cy0 = dy - k * 0.62 - abs(cos(beat)) * k * 0.08;
     let cw = k * 0.44;
@@ -929,7 +1186,7 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
                 else if g >= 16 { draw_flame(hud, g, x, y, t, tm); }
             }
         }
-        for b in s.bombs { draw_bomb(hud, b, ox, oy, t, tm); }
+        for b in s.bombs { draw_bomb(hud, s, b, ox, oy, t, tm); }
         for k in 2 {
             if s.sheep[k].alive != 0 { draw_sheep(hud, s.sheep[k], ox + s.sheep[k].x as f32 / TILE * t, oy + s.sheep[k].y as f32 / TILE * t, t, tm); }
         }
@@ -1073,6 +1330,7 @@ fn main() {
     guard mode == "solo" || mode == "host" || (mode == "join" && argv.len > 2) else { abort("usage: bomberman [solo | host | join HOST]"); }
     var frames = -1;
     var my_name: u8[..12] = [];
+    var my_kind: u8 = if mode == "join" { CHAR_GOOSE } else { default_kind(0) };
     for i in argv.len {
         if argv[i] == "--frames" && i + 1 < argv.len { frames = parse_int(argv[i + 1]); }
         if argv[i] == "--name" && i + 1 < argv.len {
@@ -1100,8 +1358,10 @@ fn main() {
     var n_applied = 0;       // snapshots applied (from either channel)
     let none = http::MailAddress { .. };
     var addr: http::MailAddress[4] = [none, none, none, none];
+    for i in 4 { s.players[i].kind = default_kind(i); }
     s.players[0].on = 1;
     s.players[0].name = my_name;
+    s.players[0].kind = my_kind;
     s.drops = 33;
     reset_round(s, r);
     if mode == "host" {
@@ -1112,7 +1372,7 @@ fn main() {
         var url: u8[..64] = [];
         format(url, "ws://", argv[2], ":8080/ws");
         thread_spawn(client, url);
-        if my_name.len > 0 { qput(Profile { my_name }); }
+        if my_name.len > 0 { qput(Profile { my_kind, my_name }); }
     }
     guard gfx::open("Bomberman", 960, 720, gfx::WINDOW_RESIZABLE) else { abort(str("gfx: ", gfx::error())); }
     audio::open();
@@ -1228,11 +1488,11 @@ fn main() {
                 if who >= 0 && uage[who] < 30 && !m.leave && !m.is_profile { continue; }   // UDP is carrying this player's input
                 if who < 0 && !m.leave {
                     for i in 1..4 { if who < 0 && s.players[i].on == 0 { who = i; } }
-                    if who >= 0 { addr[who] = m.reply; s.players[who].on = 1; s.players[who].name.resize(0); s.players[who].wins = 0; s.players[who].streak = 0; upeer[who] = -1; uage[who] = 999; reset_round(s, r); }
+                    if who >= 0 { addr[who] = m.reply; s.players[who].on = 1; s.players[who].name.resize(0); s.players[who].kind = default_kind(who); s.players[who].wins = 0; s.players[who].streak = 0; upeer[who] = -1; uage[who] = 999; reset_round(s, r); }
                 }
                 if who < 0 { continue; }
                 if m.leave { s.players[who].on = 0; s.players[who].alive = 0; upeer[who] = -1; uage[who] = 999; }
-                else if m.is_profile { s.players[who].name = m.name; }
+                else if m.is_profile { s.players[who].name = m.name; s.players[who].kind = m.kind; }
                 else { s.players[who].bits = m.bits; ack[who] = m.seq; }
             }
             loop {          // datagrams: 'B', slot, bits, seq lo, seq hi
@@ -1304,19 +1564,32 @@ fn main() {
         }
         ui::end(panel);
         if menu_open {
-            let mw: f32 = 340.0;
-            let mh: f32 = 160.0;
+            let mw: f32 = 400.0;
+            let mh: f32 = 285.0;
             if ui::begin(menu, "Player Setup", ui::rect((sz.x as f32 - mw) * 0.5, (sz.y as f32 - mh) * 0.5, mw, mh), ui::WINDOW_BORDER | ui::WINDOW_TITLE | ui::WINDOW_NO_SCROLLBAR) {
-                ui::layout_row_dynamic(menu, 24.0, 1);
-                ui::label(menu, "Enter your name (max 12 chars):", ui::TEXT_LEFT);
+                ui::layout_row_dynamic(menu, 22.0, 1);
+                ui::label(menu, "Your Name (max 12 chars):", ui::TEXT_LEFT);
                 ui::layout_row_dynamic(menu, 30.0, 1);
                 let ed = ui::edit_string(menu, ui::EDIT_FIELD | ui::EDIT_SIG_ENTER, my_name, ui::FILTER_ASCII);
+                ui::layout_row_dynamic(menu, 22.0, 1);
+                ui::label(menu, "Pick your Farm Character:", ui::TEXT_LEFT);
+                var changed = false;
+                ui::layout_row_dynamic(menu, 28.0, 2);
+                if ui::option_label(menu, "Goose (Eggs)", my_kind == CHAR_GOOSE) { my_kind = CHAR_GOOSE; changed = true; }
+                if ui::option_label(menu, "Squirrel (Acorns)", my_kind == CHAR_SQUIRREL) { my_kind = CHAR_SQUIRREL; changed = true; }
+                ui::layout_row_dynamic(menu, 28.0, 2);
+                if ui::option_label(menu, "Baby (Diapers)", my_kind == CHAR_BABY) { my_kind = CHAR_BABY; changed = true; }
+                if ui::option_label(menu, "Cow (Patties)", my_kind == CHAR_COW) { my_kind = CHAR_COW; changed = true; }
+                ui::layout_row_dynamic(menu, 28.0, 2);
+                if ui::option_label(menu, "Pig (Bacon)", my_kind == CHAR_PIG) { my_kind = CHAR_PIG; changed = true; }
+                if ui::option_label(menu, "Farmer (Hay Bales)", my_kind == CHAR_FARMER) { my_kind = CHAR_FARMER; changed = true; }
                 ui::layout_row_dynamic(menu, 32.0, 1);
                 let done = ui::button_label(menu, "Play!") || (ed & ui::EDIT_COMMITTED) != 0;
                 if mode == "join" {
-                    if (ed & ui::EDIT_ACTIVE) != 0 || done { qput(Profile { my_name }); }
+                    if changed || (ed & ui::EDIT_ACTIVE) != 0 || done { qput(Profile { my_kind, my_name }); }
                 } else {
                     s.players[0].name = my_name;
+                    s.players[0].kind = my_kind;
                 }
                 if done { menu_open = false; }
             }
