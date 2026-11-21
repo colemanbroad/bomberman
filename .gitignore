@@ -1,0 +1,5 @@
+bomberman
+bomberman-portable
+*.zip
+dist/
+*.log
