@@ -2294,9 +2294,11 @@ fn main() {
     guard mode == "solo" || mode == "host" || (mode == "join" && argv.len > 2) else { abort("usage: bomberman [solo | host | join HOST]"); }
     var frames = -1;
     var init_map: u8 = MAP_ISLAND;
+    var force_tcp = false;
     var my_name: u8[..12] = [];
     var my_kind: u8 = if mode == "join" { CHAR_GOOSE } else { default_kind(0) };
     for i in argv.len {
+        if argv[i] == "tcp" { force_tcp = true; }
         if argv[i] == "--frames" && i + 1 < argv.len { frames = parse_int(argv[i + 1]); }
         if argv[i] == "--map" && i + 1 < argv.len { init_map = (parse_int(argv[i + 1]) & 3) as u8; }
         if argv[i] == "--name" && i + 1 < argv.len {
@@ -2309,15 +2311,22 @@ fn main() {
     var prev = State { .. };
     var r = rng { random_seed() };
     var ack: i64[4] = [0, 0, 0, 0];
+    var inp_max: i64[4] = [-1, -1, -1, -1];    // host: highest input seq received from each client
+    var inp_bits: u8[>..] = [];
+    inp_bits.resize(128, 0);                   // host: 32-slot seq input ring per player
+    var inp_seq: i64[>..] = [];
+    inp_seq.resize(128, -1);
     let usock = if mode == "host" { udp_open(8080) } else { -1 };
     var upeer: i64[4] = [-1, -1, -1, -1];      // host: where each client's datagrams come from
     var uage: i64[4] = [999, 999, 999, 999];   // host: ticks since a client's last datagram
+    var uok: bool[4] = [false, false, false, false]; // host: client confirmed receiving UDP snapshots
     var rbuf: u8[>..] = [];
     rbuf.resize(4096, 0);
-    let want_udp = mode == "join" && argv.len > 3 && argv[3] == "udp";
+    let want_udp = mode == "join" && !force_tcp;
     let csock = if want_udp { udp_open(0) } else { -1 };
     let hostpeer = if want_udp { udp_peer(argv[2], 8080) } else { -1 };
-    guard !want_udp || (csock >= 0 && hostpeer >= 0) else { abort("udp: cannot open a socket or resolve the host"); }
+    let use_udp = want_udp && csock >= 0 && hostpeer >= 0;
+    var udp_rx_age = 999; // client: ticks since last UDP snapshot received from host
     var joined = false;  // client: got the first snapshot, so we know our slot
     var lasttick = 0;
     var n_udp = 0;       // datagrams received (host: inputs, client: snapshots)
@@ -2397,13 +2406,16 @@ fn main() {
         let bits = if frames >= 0 { bot(frame, if mode == "join" { 3 } else { 0 }) } else if typing { 0 as u8 } else { keys() };
         acc += if frames >= 0 { 1.0 / 60.0 } else { min(gfx::delta_time(), 0.1) };
         if mode == "join" {
-            loop {          // datagram snapshots join the WebSocket's in one stream
-                var from = 0;
-                let got = udp_recv(csock, rbuf[..], from);
-                if got < 0 { break; }
-                var f = State { .. };
-                if http::mail_value(rbuf[0..got], f) { qput(f); n_udp += 1; }
+            if use_udp {
+                loop {          // datagram snapshots join the WebSocket's in one stream
+                    var from = 0;
+                    let got = udp_recv(csock, rbuf[..], from);
+                    if got < 0 { break; }
+                    var f = State { .. };
+                    if http::mail_value(rbuf[0..got], f) { qput(f); n_udp += 1; udp_rx_age = 0; }
+                }
             }
+            var got_snap = false;
             loop {
                 let f, got = qpoll<State>();
                 guard got else { break; }
@@ -2411,48 +2423,69 @@ fn main() {
                 lasttick = f.tick;
                 n_applied += 1;
                 joined = true;
+                got_snap = true;
                 s = f;
-                // The snapshot is a round trip old: replay the inputs the host has not seen, then ease toward that.
-                var c = s;
-                let back = min((seq - s.ack) & 65535, hist.len);
-                if c.players[s.you].alive != 0 {
-                    for j in hist.len - back..hist.len { c.players[s.you].bits = hist[j]; step_player(c, s.you); }
-                } else if c.players[s.you].dead_mode != DEAD_NONE {
-                    for j in hist.len - back..hist.len { c.players[s.you].bits = hist[j]; step_dead(c, s.you); }
-                }
-                let ex = c.players[s.you].x - px;
-                let ey = c.players[s.you].y - py;
-                if abs(ex) + abs(ey) > TILE { px = c.players[s.you].x; py = c.players[s.you].y; }
-                else { px += ex / 3; py += ey / 3; }
                 hear(prev, s, sfx, fx);
                 prev = s;
             }
+            // Reconcile once per frame against the newest snapshot (never against intermediate burst ticks).
+            if got_snap {
+                if s.over > 0 {
+                    px = s.players[s.you].x;
+                    py = s.players[s.you].y;
+                    hist.resize(0);
+                } else {
+                    var c = s;
+                    let back = min((seq - s.ack) & 65535, hist.len);
+                    if c.players[s.you].alive != 0 {
+                        for j in hist.len - back..hist.len { c.players[s.you].bits = hist[j]; step_player(c, s.you); }
+                    } else if c.players[s.you].dead_mode != DEAD_NONE {
+                        for j in hist.len - back..hist.len { c.players[s.you].bits = hist[j]; step_dead(c, s.you); }
+                    }
+                    let ex = c.players[s.you].x - px;
+                    let ey = c.players[s.you].y - py;
+                    let err = abs(ex) + abs(ey);
+                    if err > TILE { px = c.players[s.you].x; py = c.players[s.you].y; }
+                    else if err > 2 {
+                        let sx = if ex > 0 { max(1, ex / 4) } else if ex < 0 { min(-1, ex / 4) } else { 0 };
+                        let sy = if ey > 0 { max(1, ey / 4) } else if ey < 0 { min(-1, ey / 4) } else { 0 };
+                        px += sx;
+                        py += sy;
+                    }
+                }
+            }
             let l, gone = qpoll<Lost>();
             if gone { fx.lost = true; }
-            // Predict our own player with the same rules, so keys answer at once.
+            // Predict our own player at 60 Hz and send redundant 8-tick UDP input packets at 60 Hz.
             while acc >= 1.0 / 60.0 {
                 acc -= 1.0 / 60.0;
+                if udp_rx_age < 999 { udp_rx_age += 1; }
                 seq = (seq + 1) & 65535;
                 if hist.len >= 240 { remove_at(hist, 0); }
                 hist.push(bits);
-                var c = s;
-                c.players[s.you].x = px;
-                c.players[s.you].y = py;
-                c.players[s.you].bits = bits;
-                if c.players[s.you].alive != 0 { step_player(c, s.you); }
-                else if c.players[s.you].dead_mode != DEAD_NONE { step_dead(c, s.you); }
-                px = c.players[s.you].x;
-                py = c.players[s.you].y;
-            }
-            qput(Pad { bits, seq });
-            if want_udp && joined {
-                var d: u8[>..] = [];
-                d.push(66);
-                d.push(s.you);
-                d.push(bits);
-                d.push((seq & 255) as u8);
-                d.push((seq >> 8) as u8);
-                udp_send(csock, d[..], hostpeer);
+                if joined && s.over == 0 {
+                    var c = s;
+                    c.players[s.you].x = px;
+                    c.players[s.you].y = py;
+                    c.players[s.you].bits = bits;
+                    if c.players[s.you].alive != 0 { step_player(c, s.you); }
+                    else if c.players[s.you].dead_mode != DEAD_NONE { step_dead(c, s.you); }
+                    px = c.players[s.you].x;
+                    py = c.players[s.you].y;
+                }
+                qput(Pad { bits, seq });
+                if use_udp && joined {
+                    let cnt = min(8, hist.len);
+                    var d: u8[>..] = [];
+                    d.push(67);                                  // 'C': redundant input ring packet
+                    d.push(s.you);
+                    d.push(if udp_rx_age < 45 { 1 } else { 0 }); // bidirectional UDP health bit
+                    d.push((seq & 255) as u8);
+                    d.push((seq >> 8) as u8);
+                    d.push(cnt as u8);
+                    for k in cnt { d.push(hist[hist.len - 1 - k]); }
+                    udp_send(csock, d[..], hostpeer);
+                }
             }
         } else {
             s.players[0].bits = bits;
@@ -2464,29 +2497,125 @@ fn main() {
                 if who >= 0 && uage[who] < 30 && !m.leave && !m.is_profile { continue; }   // UDP is carrying this player's input
                 if who < 0 && !m.leave {
                     for i in 1..4 { if who < 0 && s.players[i].on == 0 { who = i; } }
-                    if who >= 0 { addr[who] = m.reply; s.players[who].on = 1; s.players[who].name.resize(0); s.players[who].kind = default_kind(who); s.players[who].wins = 0; s.players[who].streak = 0; upeer[who] = -1; uage[who] = 999; reset_round(s, r); }
+                    if who >= 0 {
+                        addr[who] = m.reply;
+                        s.players[who].on = 1;
+                        s.players[who].name.resize(0);
+                        s.players[who].kind = default_kind(who);
+                        s.players[who].wins = 0;
+                        s.players[who].streak = 0;
+                        upeer[who] = -1;
+                        uage[who] = 999;
+                        uok[who] = false;
+                        inp_max[who] = -1;
+                        ack[who] = 0;
+                        for k in 32 { inp_seq[who * 32 + k] = -1; }
+                        reset_round(s, r);
+                    }
                 }
                 if who < 0 { continue; }
-                if m.leave { s.players[who].on = 0; s.players[who].alive = 0; upeer[who] = -1; uage[who] = 999; }
-                else if m.is_profile { s.players[who].name = m.name; s.players[who].kind = m.kind; }
-                else { s.players[who].bits = m.bits; ack[who] = m.seq; }
+                if m.leave {
+                    s.players[who].on = 0;
+                    s.players[who].alive = 0;
+                    upeer[who] = -1;
+                    uage[who] = 999;
+                    uok[who] = false;
+                    inp_max[who] = -1;
+                } else if m.is_profile {
+                    s.players[who].name = m.name;
+                    s.players[who].kind = m.kind;
+                } else {
+                    if inp_max[who] < 0 { ack[who] = (m.seq - 1) & 65535; inp_max[who] = m.seq; }
+                    let df = (m.seq - ack[who]) & 65535;
+                    if df > 0 && df < 32 {
+                        let sl = who * 32 + (m.seq & 31);
+                        inp_bits[sl] = m.bits;
+                        inp_seq[sl] = m.seq;
+                    }
+                    if ((m.seq - inp_max[who]) & 65535) < 32768 { inp_max[who] = m.seq; }
+                }
             }
-            loop {          // datagrams: 'B', slot, bits, seq lo, seq hi
+            loop {          // datagrams: 'C', slot, rx_ok, seq lo, seq hi, count, bits[0..count-1]
                 var from = 0;
                 let got = udp_recv(usock, rbuf[..], from);
                 if got < 0 { break; }
-                guard got >= 5 && rbuf[0] == 66 else { continue; }
-                let who = rbuf[1] as i64;
-                guard who >= 1 && who < 4 && s.players[who].on != 0 else { continue; }
-                let sq = (rbuf[3] as i64) | ((rbuf[4] as i64) << 8);
-                n_udp += 1;
-                upeer[who] = from;
-                uage[who] = 0;
-                if ((sq - ack[who]) & 65535) < 32768 { s.players[who].bits = rbuf[2]; ack[who] = sq; }
+                if got >= 7 && rbuf[0] == 67 {
+                    let who = rbuf[1] as i64;
+                    guard who >= 1 && who < 4 && s.players[who].on != 0 else { continue; }
+                    let sq = (rbuf[3] as i64) | ((rbuf[4] as i64) << 8);
+                    let cnt = min(8, min(rbuf[5] as i64, got - 6));
+                    n_udp += 1;
+                    upeer[who] = from;
+                    uage[who] = 0;
+                    uok[who] = rbuf[2] != 0;
+                    if inp_max[who] < 0 { ack[who] = (sq - 1) & 65535; inp_max[who] = sq; }
+                    for k in cnt {
+                        let sk = (sq - k) & 65535;
+                        let df = (sk - ack[who]) & 65535;
+                        if df > 0 && df < 32 {
+                            let sl = who * 32 + (sk & 31);
+                            inp_bits[sl] = rbuf[6 + k];
+                            inp_seq[sl] = sk;
+                        }
+                    }
+                    if ((sq - inp_max[who]) & 65535) < 32768 { inp_max[who] = sq; }
+                } else if got >= 5 && rbuf[0] == 66 {
+                    let who = rbuf[1] as i64;
+                    guard who >= 1 && who < 4 && s.players[who].on != 0 else { continue; }
+                    let sq = (rbuf[3] as i64) | ((rbuf[4] as i64) << 8);
+                    n_udp += 1;
+                    upeer[who] = from;
+                    uage[who] = 0;
+                    if inp_max[who] < 0 { ack[who] = (sq - 1) & 65535; inp_max[who] = sq; }
+                    let df = (sq - ack[who]) & 65535;
+                    if df > 0 && df < 32 {
+                        let sl = who * 32 + (sq & 31);
+                        inp_bits[sl] = rbuf[2];
+                        inp_seq[sl] = sq;
+                    }
+                    if ((sq - inp_max[who]) & 65535) < 32768 { inp_max[who] = sq; }
+                }
             }
             while acc >= 1.0 / 60.0 {
                 acc -= 1.0 / 60.0;
-                tick(s, r, n);
+                if s.over > 0 {
+                    for i in 1..4 {
+                        if s.players[i].on != 0 && inp_max[i] >= 0 { ack[i] = inp_max[i]; }
+                    }
+                    tick(s, r, n);
+                } else {
+                    // Consume each client's inputs in exact seq order so ack always matches simulated movement.
+                    for i in 1..4 {
+                        guard s.players[i].on != 0 else { continue; }
+                        if inp_max[i] < 0 { s.players[i].bits = 0; continue; }
+                        var pend = (inp_max[i] - ack[i]) & 65535;
+                        if pend >= 32768 { pend = 0; }
+                        if pend > 24 { ack[i] = (inp_max[i] - 2) & 65535; pend = 2; }
+                        var extra = min(3, max(0, pend - 2));
+                        while extra > 0 {
+                            let nsq = (ack[i] + 1) & 65535;
+                            let sl = i * 32 + (nsq & 31);
+                            let b = if inp_seq[sl] == nsq { inp_bits[sl] } else { s.players[i].bits };
+                            s.players[i].bits = b;
+                            ack[i] = nsq;
+                            if s.players[i].alive != 0 { step_player(s, i); }
+                            else if s.players[i].dead_mode != DEAD_NONE { step_dead(s, i); }
+                            extra -= 1;
+                            pend -= 1;
+                        }
+                        if pend >= 1 {
+                            let nsq = (ack[i] + 1) & 65535;
+                            let sl = i * 32 + (nsq & 31);
+                            let b = if inp_seq[sl] == nsq { inp_bits[sl] } else { s.players[i].bits };
+                            s.players[i].bits = b;
+                            ack[i] = nsq;
+                        } else {
+                            // Waiting on a delayed packet: do not move extra unacknowledged pixels.
+                            s.players[i].bits = s.players[i].bits & HOLD;
+                        }
+                    }
+                    tick(s, r, n);
+                }
                 n += 1;
                 s.tick = n;
                 for i in 1..4 {
@@ -2495,15 +2624,23 @@ fn main() {
                     c.you = i as u8;
                     c.ack = ack[i];
                     uage[i] += 1;
-                    let viaudp = uage[i] < 30 && upeer[i] >= 0;
-                    if viaudp {
+                    let send_udp = uage[i] < 30 && upeer[i] >= 0;
+                    let bidir_udp = send_udp && uok[i];
+                    if send_udp {
                         var one = [c];
                         var image: u8[>..] = [];
                         one.to_bytes(image);
                         udp_send(usock, image[..], upeer[i]);
                     }
-                    if !viaudp || n % 30 == 0 {          // TCP carries every snapshot, or just a heartbeat while UDP flows
-                        if http::mail_send_value(addr[i], 0, c) == http::STALE { s.players[i].on = 0; s.players[i].alive = 0; }
+                    if !bidir_udp || n % 30 == 0 {          // TCP carries 60 Hz until both directions of UDP are confirmed
+                        if http::mail_send_value(addr[i], 0, c) == http::STALE {
+                            s.players[i].on = 0;
+                            s.players[i].alive = 0;
+                            upeer[i] = -1;
+                            uage[i] = 999;
+                            uok[i] = false;
+                            inp_max[i] = -1;
+                        }
                     }
                 }
             }
@@ -2512,8 +2649,11 @@ fn main() {
         }
         for i in 4 {
             let tgt = float2 { s.players[i].x as f32, s.players[i].y as f32 };
-            if mode == "join" { shown[i] = if i == s.you { float2 { px as f32, py as f32 } } else { shown[i] + (tgt - shown[i]) * 0.5 }; }
-            else { shown[i] = tgt; }
+            if mode == "join" {
+                if i == s.you { shown[i] = float2 { px as f32, py as f32 }; }
+                else if abs(tgt.x - shown[i].x) + abs(tgt.y - shown[i].y) > TILE * 2.0 { shown[i] = tgt; }
+                else { shown[i] = shown[i] + (tgt - shown[i]) * 0.4; }
+            } else { shown[i] = tgt; }
         }
         var di = 0;
         while di < fx.dust.len {
@@ -2533,7 +2673,7 @@ fn main() {
                 tune = audio::play(songs[track], if muted { 0.0 } else { mvol }, 0.0, 1.0, true);
             }
         }
-        draw(hud, big, s, shown, fx, if want_udp { "udp" } else { mode });
+        draw(hud, big, s, shown, fx, if use_udp && udp_rx_age < 45 { "udp" } else { mode });
         let sz = gfx::screen_size();
         if ui::begin(panel, "Bar", ui::rect(sz.x as f32 - 390.0, 4.0, 240.0, 28.0), ui::WINDOW_NO_SCROLLBAR) {
             if mode != "join" {
