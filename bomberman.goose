@@ -57,13 +57,31 @@ fn map_name(m: u8) -> const u8[:] {
     return "Desert";
 }
 
+let PWR_FLAME: u16 = 1;
+let PWR_BOMB: u16 = 2;
+let PWR_SPEED: u16 = 4;
+let PWR_GHOST: u16 = 8;
+let PWR_KICK: u16 = 16;
+let PWR_ALL: u16 = 31;
+
+fn pick_power(mask: u16, r: rng&) -> u8 {
+    var opts: u8[..16] = [];
+    if (mask & PWR_FLAME) != 0 { opts.push(3); }
+    if (mask & PWR_BOMB) != 0 { opts.push(4); }
+    if (mask & PWR_SPEED) != 0 { opts.push(5); }
+    if (mask & PWR_GHOST) != 0 { opts.push(8); }
+    if (mask & PWR_KICK) != 0 { opts.push(9); }
+    if opts.len == 0 { return 0; }
+    return opts[r.rand_int(opts.len)];
+}
+
 let ROBOTO: const u8[:] = embed_file("Roboto-Regular.ttf");
 struct Player { x: i64, y: i64, on: u8, alive: u8, bombs: u8, range: u8, speed: u8, wins: u8, streak: u8, bits: u8, held: u8, placed: u8, ghost: u16, kick: u8, kind: u8, name: u8[..12] }
 // dir: 0 still, 1 up, 2 down, 3 left, 4 right (a kicked bomb slides); m: ticks since its last step.
 struct Bomb { x: u8, y: u8, t: u8, range: u8, owner: u8, dir: u8, m: u8 }
 // A sheep wanders at random and blocks the way like a movable block. dir: 0 up, 1 down, 2 left, 3 right, 4 grazing.
 struct Sheep { x: i64, y: i64, alive: u8, dir: u8, t: u8 }
-struct State { grid: u8[195], players: Player[4], bombs: Bomb[..16], sheep: Sheep[2], drops: u8, map: u8, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
+struct State { grid: u8[195], players: Player[4], bombs: Bomb[..16], sheep: Sheep[2], drops: u8, regrow: u8, map: u8, power_mask: u16, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
 
 // UDP (udp.c): inputs and snapshots fly as datagrams when a client joins with `udp`; the WebSocket stays up for
 // joining, leaving and a slow heartbeat. Each snapshot carries its tick, so stale or reordered ones are dropped.
@@ -340,10 +358,40 @@ fn tick(s: State&, r: rng&, n: i64) {
             if g < 16 { continue; }
             if g % 16 > 0 { s.grid[i] = g - 1; }
             else if g >= 48 || (g >= 32 && r.rand_int(100) < s.drops as i64) {
-                let k = r.rand_int(5);
-                s.grid[i] = if k == 3 { 8 } else if k == 4 { 9 } else { 3 + k as u8 };
+                s.grid[i] = pick_power(s.power_mask, r);
             }
             else { s.grid[i] = 0; }
+        }
+    }
+    // Randomly spawn new blocks when the arena gets too empty, at a host-controllable rate.
+    if s.regrow > 0 {
+        let iv = max(18, 260 - (s.regrow as i64) * 24 / 10);
+        if n > 0 && n % iv == 0 {
+            var blocks = 0;
+            for i in W * H {
+                let g = s.grid[i];
+                if g == 2 || g == 6 || g == 7 { blocks += 1; }
+            }
+            if blocks < 34 {
+                for tries in 24 {
+                    let tx = 1 + r.rand_int(W - 2);
+                    let ty = 1 + r.rand_int(H - 2);
+                    if s.grid[ty * W + tx] != 0 || bomb_at(s, tx, ty) >= 0 { continue; }
+                    var clear = true;
+                    for i in 4 {
+                        guard s.players[i].on != 0 && s.players[i].alive != 0 else { continue; }
+                        if abs(s.players[i].x / TILE - tx) <= 1 && abs(s.players[i].y / TILE - ty) <= 1 { clear = false; }
+                    }
+                    for k in 2 {
+                        if s.sheep[k].alive != 0 && abs(s.sheep[k].x / TILE - tx) <= 1 && abs(s.sheep[k].y / TILE - ty) <= 1 { clear = false; }
+                    }
+                    if clear {
+                        let roll = r.rand_int(100);
+                        s.grid[ty * W + tx] = if roll < 6 { 6 } else if roll < 12 { 7 } else { 2 };
+                        break;
+                    }
+                }
+            }
         }
     }
     for k in 2 {
@@ -748,7 +796,10 @@ fn hear(prev: State&, s: State&, sfx: Sfx, fx: Fx&) {
             fx.shake = 9.0;
         }
     }
-    for i in W * H { if prev.grid[i] == 6 && s.grid[i] == 2 { audio::play(sfx.clank, 0.5, pan((i % W) * TILE), 1.0, false); } }
+    for i in W * H {
+        if prev.grid[i] == 6 && s.grid[i] == 2 { audio::play(sfx.clank, 0.5, pan((i % W) * TILE), 1.0, false); }
+        else if prev.grid[i] == 0 && (s.grid[i] == 2 || s.grid[i] == 6 || s.grid[i] == 7) { audio::play(sfx.clank, 0.3, pan((i % W) * TILE), 0.7, false); }
+    }
     for k in 2 { if prev.sheep[k].alive != 0 && s.sheep[k].alive == 0 { audio::play(sfx.die, 0.6, pan(s.sheep[k].x), 1.6, false); } }
     for i in 4 {
         let a = prev.players[i];
@@ -1606,7 +1657,9 @@ fn main() {
     s.players[0].name = my_name;
     s.players[0].kind = my_kind;
     s.drops = 33;
+    s.regrow = 35;
     s.map = init_map;
+    s.power_mask = PWR_ALL;
     reset_round(s, r);
     if mode == "host" {
         let cfg = http::Config { port: 8080, workers: 1, mail_slots: 64, mail_size: 4096, max_waiting: 16, .. };
@@ -1638,6 +1691,7 @@ fn main() {
     let panel = overlay(18.0);
     let menu = ui::create_from_memory(ROBOTO, 17.0);
     var menu_open = frames < 0 && my_name.len == 0;
+    var host_open = false;
     let z = float2 { 0.0, 0.0 };
     var shown: float2[4] = [z, z, z, z];
     var fx = Fx { .. };
@@ -1651,9 +1705,11 @@ fn main() {
     while gfx::frame() {
         if frame == frames { break; }
         if gfx::key_pressed("Escape") {
-            if menu_open { menu_open = false; } else { break; }
+            if host_open { host_open = false; }
+            else if menu_open { menu_open = false; }
+            else { break; }
         }
-        let typing = menu_open || ui::wants_keyboard(menu);
+        let typing = menu_open || host_open || ui::wants_keyboard(menu);
         if !typing && gfx::key_pressed("N") && !own {          // cycle through all map themes + classic & dark tracks
             track = (track + 1) % 6;
             audio::stop(tune);
@@ -1803,21 +1859,72 @@ fn main() {
         }
         draw(hud, big, s, shown, fx, if want_udp { "udp" } else { mode });
         let sz = gfx::screen_size();
-        if ui::begin(panel, "Bar", ui::rect(sz.x as f32 - 440.0, 4.0, 310.0, 28.0), ui::WINDOW_NO_SCROLLBAR) {
+        if ui::begin(panel, "Bar", ui::rect(sz.x as f32 - 390.0, 4.0, 240.0, 28.0), ui::WINDOW_NO_SCROLLBAR) {
             if mode != "join" {
-                let rat: f32[3] = [0.28, 0.34, 0.38];
+                let rat: f32[2] = [0.42, 0.58];
                 ui::layout_row(panel, ui::DYNAMIC, 22.0, rat);
-                if ui::button_label(panel, "Profile") { menu_open = !menu_open; }
-                var mlbl: u8[>..] = [];
-                format(mlbl, "Map: ", map_name(s.map));
-                if ui::button_label(panel, mlbl) { s.map = (s.map + 1) % 4; reset_round(s, r); }
-                s.drops = ui::slide_int(panel, 0, s.drops as i64, 100, 1) as u8;
+                if ui::button_label(panel, "Profile") { menu_open = !menu_open; if menu_open { host_open = false; } }
+                if ui::button_label(panel, "Host Settings") { host_open = !host_open; if host_open { menu_open = false; } }
             } else {
                 ui::layout_row_dynamic(panel, 22.0, 1);
                 if ui::button_label(panel, "Profile") { menu_open = !menu_open; }
             }
         }
         ui::end(panel);
+        if host_open && mode != "join" {
+            let hw: f32 = 460.0;
+            let hh: f32 = 420.0;
+            if ui::begin(menu, "Host Settings", ui::rect((sz.x as f32 - hw) * 0.5, (sz.y as f32 - hh) * 0.5, hw, hh), ui::WINDOW_BORDER | ui::WINDOW_TITLE | ui::WINDOW_NO_SCROLLBAR) {
+                ui::layout_row_dynamic(menu, 22.0, 1);
+                ui::label(menu, "Map (changes music & theme):", ui::TEXT_LEFT);
+                ui::layout_row_dynamic(menu, 26.0, 4);
+                if ui::option_label(menu, "Island", s.map == MAP_ISLAND) { s.map = MAP_ISLAND; reset_round(s, r); }
+                if ui::option_label(menu, "Forest", s.map == MAP_FOREST) { s.map = MAP_FOREST; reset_round(s, r); }
+                if ui::option_label(menu, "Mountains", s.map == MAP_MOUNTAINS) { s.map = MAP_MOUNTAINS; reset_round(s, r); }
+                if ui::option_label(menu, "Desert", s.map == MAP_DESERT) { s.map = MAP_DESERT; reset_round(s, r); }
+                ui::layout_row_dynamic(menu, 22.0, 1);
+                var dlbl: u8[>..] = [];
+                format(dlbl, "Power-Up Drop Rate: ", s.drops, "%");
+                ui::label(menu, dlbl, ui::TEXT_LEFT);
+                ui::layout_row_dynamic(menu, 22.0, 1);
+                s.drops = ui::slide_int(menu, 0, s.drops as i64, 100, 1) as u8;
+                ui::layout_row_dynamic(menu, 22.0, 1);
+                var rlbl: u8[>..] = [];
+                if s.regrow == 0 { rlbl.append("Wall Regrowth when Empty: OFF"); }
+                else { format(rlbl, "Wall Regrowth when Empty: ", s.regrow, "%"); }
+                ui::label(menu, rlbl, ui::TEXT_LEFT);
+                ui::layout_row_dynamic(menu, 22.0, 1);
+                s.regrow = ui::slide_int(menu, 0, s.regrow as i64, 100, 5) as u8;
+                ui::layout_row_dynamic(menu, 22.0, 3);
+                ui::label(menu, "Enabled Power-Ups:", ui::TEXT_LEFT);
+                if ui::button_label(menu, "All") { s.power_mask = PWR_ALL; }
+                if ui::button_label(menu, "None") { s.power_mask = 0; }
+                var p0 = (s.power_mask & PWR_FLAME) != 0;
+                var p1 = (s.power_mask & PWR_BOMB) != 0;
+                var p2 = (s.power_mask & PWR_SPEED) != 0;
+                var p3 = (s.power_mask & PWR_GHOST) != 0;
+                var p4 = (s.power_mask & PWR_KICK) != 0;
+                ui::layout_row_dynamic(menu, 24.0, 2);
+                ui::checkbox_label(menu, "Flame (Range+)", p0);
+                ui::checkbox_label(menu, "Extra Bomb", p1);
+                ui::layout_row_dynamic(menu, 24.0, 2);
+                ui::checkbox_label(menu, "Speed Bolt", p2);
+                ui::checkbox_label(menu, "Ghost (Invisible)", p3);
+                ui::layout_row_dynamic(menu, 24.0, 2);
+                ui::checkbox_label(menu, "Kick Boot", p4);
+                var nm: u16 = 0;
+                if p0 { nm |= PWR_FLAME; }
+                if p1 { nm |= PWR_BOMB; }
+                if p2 { nm |= PWR_SPEED; }
+                if p3 { nm |= PWR_GHOST; }
+                if p4 { nm |= PWR_KICK; }
+                s.power_mask = nm;
+                ui::layout_row_dynamic(menu, 30.0, 2);
+                if ui::button_label(menu, "New Round") { reset_round(s, r); host_open = false; }
+                if ui::button_label(menu, "Close") { host_open = false; }
+            }
+            ui::end(menu);
+        }
         if menu_open {
             let mw: f32 = 400.0;
             let mh: f32 = 285.0;
