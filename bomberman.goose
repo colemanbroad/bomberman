@@ -26,13 +26,15 @@ let LEFT = 4;
 let RIGHT = 8;
 let BOMB = 16;
 let HOLD = 32;               // stand your ground: you can't move, and others can't walk through you
+let SLIDE = 5;               // ticks a kicked bomb takes per tile
 let GHOST = 600;             // ghost power-up length in ticks
 
-// Tile values: 0 empty, 1 wall, 2 brick, 3 range+, 4 bomb+, 5 speed+, 8 ghost, 6 steel crate (two hits), 7 gift crate (always drops),
+// Tile values: 0 empty, 1 wall, 2 brick, 3 range+, 4 bomb+, 5 speed+, 8 ghost, 9 kick, 6 steel crate (two hits), 7 gift crate (always drops),
 // 16+ttl flame, 32+ttl flame over a brick (may drop), 48+ttl flame over a gift (drops).
 let ROBOTO: const u8[:] = embed_file("Roboto-Regular.ttf");
-struct Player { x: i64, y: i64, on: u8, alive: u8, bombs: u8, range: u8, speed: u8, wins: u8, bits: u8, held: u8, placed: u8, ghost: u16 }
-struct Bomb { x: u8, y: u8, t: u8, range: u8, owner: u8 }
+struct Player { x: i64, y: i64, on: u8, alive: u8, bombs: u8, range: u8, speed: u8, wins: u8, bits: u8, held: u8, placed: u8, ghost: u16, kick: u8 }
+// dir: 0 still, 1 up, 2 down, 3 left, 4 right (a kicked bomb slides); m: ticks since its last step.
+struct Bomb { x: u8, y: u8, t: u8, range: u8, owner: u8, dir: u8, m: u8 }
 // A sheep wanders at random and blocks the way like a movable block. dir: 0 up, 1 down, 2 left, 3 right, 4 grazing.
 struct Sheep { x: i64, y: i64, alive: u8, dir: u8, t: u8 }
 struct State { grid: u8[195], players: Player[4], bombs: Bomb[..16], sheep: Sheep[2], drops: u8, over: i64, you: u8 }   // drops: percent of brick fires that leave a power-up
@@ -119,6 +121,7 @@ fn reset_round(s: State&, r: rng&) {
         s.players[i].placed = 0;
         s.players[i].held = 0;
         s.players[i].ghost = 0;
+        s.players[i].kick = 0;
     }
     for k in 2 {
         let tx = if k == 0 { 5 } else { W - 6 };
@@ -153,6 +156,36 @@ fn explode(s: State&, b: Bomb) {
     }
 }
 
+// Index of a bomb that player i's box would run into at x y (one it is not already standing on), or -1.
+fn bomb_ahead(s: State&, i: i64, x: i64, y: i64) -> i64 {
+    let p = s.players[i];
+    for ty in (y - HB) / TILE..(y + HB - 1) / TILE + 1 {
+        for tx in (x - HB) / TILE..(x + HB - 1) / TILE + 1 {
+            let on_it = tx >= (p.x - HB) / TILE && tx <= (p.x + HB - 1) / TILE &&
+                        ty >= (p.y - HB) / TILE && ty <= (p.y + HB - 1) / TILE;
+            if !on_it && bomb_at(s, tx, ty) >= 0 { return bomb_at(s, tx, ty); }
+        }
+    }
+    return -1;
+}
+
+// Can a sliding bomb not enter tile nx ny? Walls, crates, flames, bombs, sheep and holding players stop it.
+fn bomb_stopped(s: State&, nx: i64, ny: i64) -> bool {
+    let g = s.grid[ny * W + nx];
+    if g == 1 || g == 2 || g == 6 || g == 7 || g >= 16 || bomb_at(s, nx, ny) >= 0 { return true; }
+    let cx = nx * TILE + TILE / 2;
+    let cy = ny * TILE + TILE / 2;
+    for k in 2 {
+        let q = s.sheep[k];
+        if q.alive != 0 && abs(q.x - cx) < TILE / 2 + HB && abs(q.y - cy) < TILE / 2 + HB { return true; }
+    }
+    for j in 4 {
+        let q = s.players[j];
+        if q.on != 0 && q.alive != 0 && (q.bits & HOLD) != 0 && abs(q.x - cx) < TILE / 2 + HB && abs(q.y - cy) < TILE / 2 + HB { return true; }
+    }
+    return false;
+}
+
 fn step_player(s: State&, i: i64) {
     let sp = 5 + s.players[i].speed as i64;
     let bits = s.players[i].bits;
@@ -166,6 +199,13 @@ fn step_player(s: State&, i: i64) {
     if s.players[i].ghost > 0 { s.players[i].ghost -= 1; }
     let x = s.players[i].x;
     let y = s.players[i].y;
+    if s.players[i].kick != 0 && (dx != 0 || dy != 0) {          // running into a bomb kicks it
+        let b = bomb_ahead(s, i, x + dx, y + dy);
+        if b >= 0 && s.bombs[b].dir == 0 {
+            s.bombs[b].dir = if dy < 0 { 1 } else if dy > 0 { 2 } else if dx < 0 { 3 } else { 4 };
+            s.bombs[b].m = 0;
+        }
+    }
     if dx == 0 && dy == 0 {
     } else if !blocked(s, i, x + dx, y + dy) {
         s.players[i].x = x + dx;
@@ -182,16 +222,17 @@ fn step_player(s: State&, i: i64) {
     let tx = s.players[i].x / TILE;
     let ty = s.players[i].y / TILE;
     let g = s.grid[ty * W + tx];
-    if (g >= 3 && g <= 5) || g == 8 {
+    if (g >= 3 && g <= 5) || g == 8 || g == 9 {
         if g == 3 { s.players[i].range += 1; }
         if g == 4 { s.players[i].bombs += 1; }
         if g == 5 && s.players[i].speed < 3 { s.players[i].speed += 1; }
         if g == 8 { s.players[i].ghost = GHOST; }
+        if g == 9 { s.players[i].kick = 1; }
         s.grid[ty * W + tx] = 0;
     }
     let p = s.players[i];
     if (bits & BOMB) != 0 && p.held == 0 && p.placed < p.bombs && bomb_at(s, tx, ty) < 0 {
-        s.bombs.push(Bomb { tx as u8, ty as u8, FUSE, p.range, i as u8 });
+        s.bombs.push(Bomb { tx as u8, ty as u8, FUSE, p.range, i as u8, 0, 0 });
         s.players[i].placed += 1;
     }
     s.players[i].held = if (bits & BOMB) != 0 { 1 } else { 0 };
@@ -219,6 +260,17 @@ fn tick(s: State&, r: rng&, n: i64) {
         else { s.sheep[k].x += dx; s.sheep[k].y += dy; }
     }
     for i in s.bombs.len { s.bombs[i].t -= 1; }
+    for i in s.bombs.len {
+        guard s.bombs[i].dir != 0 else { continue; }
+        s.bombs[i].m += 1;
+        guard s.bombs[i].m >= SLIDE else { continue; }
+        s.bombs[i].m = 0;
+        let b = s.bombs[i];
+        let nx = b.x as i64 + (if b.dir == 3 { -1 } else if b.dir == 4 { 1 } else { 0 });
+        let ny = b.y as i64 + (if b.dir == 1 { -1 } else if b.dir == 2 { 1 } else { 0 });
+        if bomb_stopped(s, nx, ny) { s.bombs[i].dir = 0; }
+        else { s.bombs[i].x = nx as u8; s.bombs[i].y = ny as u8; }
+    }
     loop {
         var again = false;
         var i = 0;
@@ -240,7 +292,7 @@ fn tick(s: State&, r: rng&, n: i64) {
             if g % 16 > 0 { s.grid[i] = g - 1; }
             else if g >= 48 || (g >= 32 && r.rand_int(100) < s.drops as i64) {
                 let k = r.rand_int(5);
-                s.grid[i] = if k == 4 { 8 } else { 3 + k as u8 };
+                s.grid[i] = if k == 3 { 8 } else if k == 4 { 9 } else { 3 + k as u8 };
             }
             else { s.grid[i] = 0; }
         }
@@ -412,7 +464,7 @@ fn hear(prev: State&, s: State&, sfx: Sfx, fx: Fx&) {
         guard a.on != 0 && b.on != 0 else { continue; }
         let vol = if i == s.you { 0.8 } else { 0.4 };
         if a.alive != 0 && b.alive == 0 { audio::play(sfx.die, 0.8, pan(b.x), 1.0, false); }
-        if b.range + b.bombs + b.speed > a.range + a.bombs + a.speed || (a.ghost == 0 && b.ghost > 0) { audio::play(sfx.pickup, vol, pan(b.x), 1.0, false); }
+        if b.range + b.bombs + b.speed > a.range + a.bombs + a.speed || (a.ghost == 0 && b.ghost > 0) || (a.kick == 0 && b.kick > 0) { audio::play(sfx.pickup, vol, pan(b.x), 1.0, false); }
         if b.wins > a.wins { audio::play(sfx.win, 0.8, 0.0, 1.0, false); }
     }
 }
@@ -492,7 +544,7 @@ fn draw_gift(c: ui::Context, x: f32, y: f32, t: f32, tm: f32) {
 
 fn draw_power(c: ui::Context, g: u8, x: f32, y0: f32, t: f32, tm: f32) {
     let y = y0 + sin(tm * 4.0 + x) * t * 0.04;
-    let plate = if g == 3 { ui::rgb(200, 60, 40) } else if g == 4 { ui::rgb(70, 70, 84) } else if g == 8 { ui::rgb(120, 80, 190) } else { ui::rgb(30, 150, 205) };
+    let plate = if g == 3 { ui::rgb(200, 60, 40) } else if g == 4 { ui::rgb(70, 70, 84) } else if g == 8 { ui::rgb(120, 80, 190) } else if g == 9 { ui::rgb(205, 125, 40) } else { ui::rgb(30, 150, 205) };
     ui::fill_circle(c, ui::rect(x + t * 0.04, y + t * 0.04, t * 0.92, t * 0.92), ui::rgba(255, 255, 255, 40));
     ui::fill_rect(c, ui::rect(x + t * 0.14, y + t * 0.14, t * 0.72, t * 0.72), t * 0.18, plate);
     ui::stroke_rect(c, ui::rect(x + t * 0.14, y + t * 0.14, t * 0.72, t * 0.72), t * 0.18, 2.0, ui::rgb(255, 255, 255));
@@ -510,6 +562,12 @@ fn draw_power(c: ui::Context, g: u8, x: f32, y0: f32, t: f32, tm: f32) {
         ui::fill_rect(c, ui::rect(x + t * 0.3, y + t * 0.44, t * 0.4, t * 0.28), 0.0, ui::rgb(240, 240, 255));
         for k in 3 { ui::fill_circle(c, ui::rect(x + t * (0.3 + 0.1333 * k), y + t * 0.66, t * 0.1333, t * 0.1), ui::rgb(240, 240, 255)); }
         for e in 2 { ui::fill_circle(c, ui::rect(x + t * (0.38 + 0.15 * e), y + t * 0.4, t * 0.07, t * 0.09), ui::rgb(40, 30, 70)); }
+    } else if g == 9 {   // boot
+        ui::fill_rect(c, ui::rect(x + t * 0.36, y + t * 0.24, t * 0.2, t * 0.36), 2.0, ui::rgb(255, 255, 255));
+        ui::fill_rect(c, ui::rect(x + t * 0.36, y + t * 0.5, t * 0.36, t * 0.17), t * 0.07, ui::rgb(255, 255, 255));
+        ui::fill_rect(c, ui::rect(x + t * 0.3, y + t * 0.64, t * 0.44, t * 0.06), 1.0, ui::rgb(70, 40, 20));
+        ui::stroke_line(c, x + t * 0.2, y + t * 0.42, x + t * 0.3, y + t * 0.46, 2.0, ui::rgb(255, 235, 90));
+        ui::stroke_line(c, x + t * 0.2, y + t * 0.56, x + t * 0.3, y + t * 0.56, 2.0, ui::rgb(255, 235, 90));
     } else {             // bolt
         ui::fill_triangle(c, x + t * 0.56, y + t * 0.2, x + t * 0.34, y + t * 0.52, x + t * 0.52, y + t * 0.52, ui::rgb(255, 235, 90));
         ui::fill_triangle(c, x + t * 0.48, y + t * 0.46, x + t * 0.68, y + t * 0.46, x + t * 0.44, y + t * 0.8, ui::rgb(255, 235, 90));
@@ -593,8 +651,12 @@ fn draw_sheep(c: ui::Context, q: Sheep, x: f32, y: f32, t: f32, tm: f32) {
 
 fn draw_bomb(c: ui::Context, b: Bomb, ox: f32, oy: f32, t: f32, tm: f32) {
     let k = (0.72 + 0.06 * sin(tm * 10.0 + b.t)) * t;
-    let cx = ox + (b.x + 0.5) * t;
-    let cy = oy + (b.y + 0.5) * t;
+    var cx = ox + (b.x + 0.5) * t;
+    var cy = oy + (b.y + 0.5) * t;
+    if b.dir != 0 {      // glide in from the tile it just left
+        let sl = (1.0 - (b.m as f32) / SLIDE) * t;
+        if b.dir == 1 { cy += sl; } else if b.dir == 2 { cy -= sl; } else if b.dir == 3 { cx += sl; } else { cx -= sl; }
+    }
     if b.owner == 1 { draw_egg(c, b, cx, cy, k, tm); return; }
     ui::fill_circle(c, ui::rect(cx - k * 0.5, cy + k * 0.2, k, k * 0.4), ui::rgba(0, 0, 0, 90));
     ui::fill_circle(c, ui::rect(cx - k * 0.5, cy - k * 0.5, k, k), if b.t < 45 && (b.t / 6) % 2 == 0 { ui::rgb(120, 25, 25) } else { ui::rgb(22, 22, 30) });
@@ -663,7 +725,7 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
                 else if g == 2 { draw_brick(hud, x, y, t); }
                 else if g == 6 { draw_steel(hud, x, y, t); }
                 else if g == 7 { draw_gift(hud, x, y, t, tm); }
-                else if (g >= 3 && g <= 5) || g == 8 { draw_power(hud, g, x, y, t, tm); }
+                else if (g >= 3 && g <= 5) || g == 8 || g == 9 { draw_power(hud, g, x, y, t, tm); }
                 else if g >= 16 { draw_flame(hud, g, x, y, t, tm); }
             }
         }

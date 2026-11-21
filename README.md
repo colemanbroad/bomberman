@@ -17,7 +17,7 @@ the host sends a snapshot every 60 Hz tick.
 - `windows/` has a build script and notes for Windows (untested).
 - Needs CMake and OpenSSL to build (the WebSocket client's TLS package). `Roboto-Regular.ttf` is Apache 2.0.
 
-Power-ups: flame (range), bomb (extra bomb), bolt (speed), and the purple ghost (10 s): you turn invisible to
+Power-ups: flame (range), bomb (extra bomb), bolt (speed), the orange boot (kick: run into a bomb and it slides until something solid stops it), and the purple ghost (10 s): you turn invisible to
 everyone else, leaving only a faint trail of dust while you move. You still see a faint outline of yourself.
 
 Characters: player 2 is a goose, and her bombs are eggs. Two sheep wander at random and block the way like movable
