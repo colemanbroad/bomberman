@@ -4,7 +4,7 @@ set -e
 cd "$(dirname "$0")"
 goose build bomberman.goose
 B=$HOME/.goose/build
-D=$(ls -td $B/prog/bomberman-* | head -1)
+D=$(dirname "$(ls -t $B/prog/bomberman-*/bomberman.c | head -1)")
 P=$(ls -d $B/pkg/github.com/kaitk/goose-tls/*/*/link-cc.rsp | head -1)
 sed 's/\.dylib/.a/' "$P" > /tmp/bomberman-tls.rsp
 cc -O2 -w $D/bomberman.c $(ls -d $B/runtime/*/*-release/goose_runtime.o | head -1) -o bomberman-portable \
