@@ -442,6 +442,58 @@ fn make_music(r: rng&) -> audio::Sound {
     return audio::create_sound(pcm);
 }
 
+// An 808-style sub bass note: a sine that drops in pitch, driven into soft clipping for grit.
+fn sub(pcm: f32[>..]&, at: i64, n: i64, m: i64, vol: f64) {
+    let f = 440.0 * exp(((m - 69) as f64) / 12.0 * 0.6931471805599453);
+    var phase = 0.0;
+    for i in n {
+        let u = (i as f64) / (n as f64);
+        phase += TAU * f * (1.0 + 0.6 * exp(-25.0 * u)) / 48000.0;
+        let w = max(-0.8, min(0.8, 1.6 * sin(phase)));
+        pcm[at + i] += (w * vol * exp(-1.6 * u) * min(1.0, (i as f64) / 60.0)) as f32;
+    }
+}
+
+// A slow pad swell: two detuned triangle waves under a sine envelope.
+fn swell(pcm: f32[>..]&, at: i64, n: i64, m: i64, vol: f64) {
+    let f = 440.0 * exp(((m - 69) as f64) / 12.0 * 0.6931471805599453);
+    for i in n {
+        let u = (i as f64) / (n as f64);
+        let x = f * (i as f64) / 48000.0;
+        let y = f * 1.006 * (i as f64) / 48000.0;
+        let a = x - floor(x);
+        let b = y - floor(y);
+        let w = (if a < 0.5 { 4.0 * a - 1.0 } else { 3.0 - 4.0 * a }) + (if b < 0.5 { 4.0 * b - 1.0 } else { 3.0 - 4.0 * b });
+        pcm[at + i] += (w * 0.5 * vol * sin(3.141592653589793 * u)) as f32;
+    }
+}
+
+// An original dark, heavy loop (75 BPM, D minor: Dm Bb Gm A): 808 bass, pulse-wave piano stabs, a pad and a boom-bap beat; 8 bars.
+fn make_dark(r: rng&) -> audio::Sound {
+    let step = 19200;
+    var pcm: f32[>..] = [];
+    pcm.resize(64 * step, 0.0);
+    let roots: i64[4] = [38, 34, 31, 33];
+    let chord: i64[12] = [62, 65, 69, 58, 62, 65, 55, 58, 62, 57, 61, 64];
+    let stab: i64[12] = [74, 77, 81, 70, 74, 77, 67, 70, 74, 69, 73, 76];
+    let line: i64[8] = [0, 2, 1, 2, 0, 1, 2, 1];
+    for b in 8 {
+        let c = (b / 2) % 4;
+        if b % 2 == 0 { for k in 3 { swell(pcm, b * 8 * step, 16 * step, chord[c * 3 + k], 0.2); } }
+        for s in 8 {
+            let at = (b * 8 + s) * step;
+            if s == 0 || (s == 5 && b % 2 == 1) || (s == 6 && b % 4 == 3) { sub(pcm, at, step * 3, roots[c], 0.9); }
+            if s == 0 || s == 3 || s == 6 { voice(pcm, at, step * 2, stab[c * 3 + line[(b + s) % 8]], 1, 0.2); }
+            if b >= 4 && s % 2 == 1 { voice(pcm, at, step, stab[c * 3 + line[s]] + 12, 0, 0.07); }
+            if s == 0 || s == 5 || (s == 7 && b % 2 == 1) { drum(r, pcm, at, step * 2 / 3, true, 0.8); }
+            if s == 4 { drum(r, pcm, at, step / 2, false, 0.45); }
+            if s % 2 == 0 { drum(r, pcm, at, step / 10, false, 0.06); }
+        }
+    }
+    for i in pcm.len { pcm[i] = max(-1.0, min(1.0, pcm[i] * 0.5)); }
+    return audio::create_sound(pcm);
+}
+
 fn pan(x: i64) -> f32 { ((x as f32) / ((W * TILE) as f32) - 0.5) * 1.6 }
 
 // Plays what changed between two snapshots, so a client hears what the host's game did.
@@ -880,7 +932,10 @@ fn main() {
     let own = file_exists("music.wav") && read_file("music.wav", wav) && wav_pcm(wav, pcm, info);
     if own { print("playing music.wav: ", info[0], " Hz, ", info[1], " channels"); }
     let mvol: f32 = if own { 0.5 } else { 0.2 };
-    let tune = if own { audio::play(audio::create_sound(pcm, info[0], info[1]), mvol, 0.0, 1.0, true) } else { audio::play(make_music(r), mvol, 0.0, 1.0, true) };
+    let song0 = make_music(r);
+    let song1 = make_dark(r);
+    var track = 0;
+    var tune = if own { audio::play(audio::create_sound(pcm, info[0], info[1]), mvol, 0.0, 1.0, true) } else { audio::play(song0, mvol, 0.0, 1.0, true) };
     var muted = false;
     let hud = overlay(20.0);
     let big = overlay(72.0);
@@ -895,6 +950,11 @@ fn main() {
     var frame = 0;
     while gfx::frame() {
         if gfx::key_pressed("Escape") || frame == frames { break; }
+        if gfx::key_pressed("N") && !own {          // switch between the two built-in tracks
+            track = 1 - track;
+            audio::stop(tune);
+            tune = audio::play(if track == 0 { song0 } else { song1 }, if muted { 0.0 } else { mvol }, 0.0, 1.0, true);
+        }
         if gfx::key_pressed("M") { muted = !muted; audio::set_voice(tune, if muted { 0.0 } else { mvol }, 0.0, 1.0); }
         ui::input_from_gfx(hud);
         ui::input_from_gfx(big);

@@ -1,0 +1,11 @@
+- player name
+- player character design?
+  - speed
+- portals
+- mines
+- some way to participate after you die
+  - as a ghost
+  - tilting the board
+- drop bombs on all (powerup)
+- fog of war?
+

@@ -10,7 +10,7 @@ goose build bomberman.goose
 ./bomberman                      # solo
 ```
 
-Arrows/WASD move, Space drops a bomb, hold Shift to stand your ground (you freeze and others cannot walk through you), M mutes the music, Escape quits. Up to 4 players. Clients predict their own movement and
+Arrows/WASD move, Space drops a bomb, hold Shift to stand your ground (you freeze and others cannot walk through you), M mutes the music, N switches between the two built-in tracks (the fun one and a dark, heavy one), Escape quits. Up to 4 players. Clients predict their own movement and
 the host sends a snapshot every 60 Hz tick.
 
 - `build-portable.sh` (macOS) relinks OpenSSL statically and zips a binary that runs on any Apple Silicon Mac.
