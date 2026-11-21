@@ -11,14 +11,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
+      - name: Cache Goose
+        id: cache-goose
+        uses: actions/cache@v4
+        with:
+          path: |
+            goosekit
+            ~\.goose
+          key: goose-v2026.3-windows-x64-${{ hashFiles('bomberman.build', 'bomberman.goose') }}
+          restore-keys: |
+            goose-v2026.3-windows-x64-
       - name: Install Goose
         shell: pwsh
         run: |
-          curl.exe -fsSL -o goose.zip https://github.com/aardappel/goose/releases/download/v2026.3/goose-v2026.3-windows-x64.zip
-          Expand-Archive goose.zip goosekit
+          if (!(Test-Path goosekit)) {
+            curl.exe -fsSL -o goose.zip https://github.com/aardappel/goose/releases/download/v2026.3/goose-v2026.3-windows-x64.zip
+            Expand-Archive goose.zip goosekit
+          }
           $d = (Get-ChildItem goosekit -Recurse -Filter goose.exe | Select-Object -First 1).DirectoryName
           echo $d >> $env:GITHUB_PATH
+      - name: Cache OpenSSL
+        id: cache-openssl
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_INSTALLATION_ROOT }}\installed\x64-windows
+          key: vcpkg-openssl-x64-windows-v1
       - name: Install OpenSSL
+        if: steps.cache-openssl.outputs.cache-hit != 'true'
         shell: cmd
         run: '"%VCPKG_INSTALLATION_ROOT%\vcpkg.exe" install openssl:x64-windows'
       - name: Build
@@ -31,13 +50,20 @@ jobs:
         shell: pwsh
         run: |
           Copy-Item windows\PLAY.txt dist\
-          Compress-Archive dist\* bomberman-windows.zip
+          Compress-Archive -Force dist\* bomberman-windows.zip
       - uses: actions/upload-artifact@v4
         with:
           name: bomberman-windows
           path: bomberman-windows.zip
       - name: Release
         if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create ${{ github.ref_name }} bomberman-windows.zip --title ${{ github.ref_name }} --notes "Windows build, unzip and run bomberman.exe"
+        run: |
+          gh release view ${{ github.ref_name }} 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload ${{ github.ref_name }} bomberman-windows.zip --clobber
+          } else {
+            gh release create ${{ github.ref_name }} bomberman-windows.zip --title ${{ github.ref_name }} --notes "Windows & macOS builds, unzip and run"
+          }
