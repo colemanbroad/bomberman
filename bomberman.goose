@@ -26,11 +26,16 @@ let LEFT = 4;
 let RIGHT = 8;
 let BOMB = 16;
 let HOLD = 32;               // stand your ground: you can't move, and others can't walk through you
+let MINE_KEY = 64;           // E / X drops a proximity mine (Shift+Space also works)
 let SLIDE = 5;               // ticks a kicked bomb takes per tile
 let GHOST = 600;             // ghost power-up length in ticks
+let NAPALM = 480;            // napalm trail length in ticks
+let DRUNK = 900;             // drunk jitter length in ticks
+let BOMB_UNKICK: u8 = 1;
 
-// Tile values: 0 empty, 1 wall, 2 brick, 3 range+, 4 bomb+, 5 speed+, 8 ghost, 9 kick, 6 steel crate (two hits), 7 gift crate (always drops),
-// 16+ttl flame, 32+ttl flame over a brick (may drop), 48+ttl flame over a gift (drops).
+// Tile values: 0 empty, 1 wall, 2 brick, 3 range+, 4 bomb+, 5 speed+, 6 steel crate (two hits), 7 gift crate (always drops),
+// 8 ghost, 9 kick, 10 missile, 11 napalm, 12 mines, 13 drunk, 14 bad/curse, 15 unkickable bombs,
+// 16..31 flame, 32..47 flame over brick, 48..63 flame over gift, 64..95 slow-decaying napalm flame.
 let CHAR_GOOSE: u8 = 0;
 let CHAR_SQUIRREL: u8 = 1;
 let CHAR_BABY: u8 = 2;
@@ -62,7 +67,18 @@ let PWR_BOMB: u16 = 2;
 let PWR_SPEED: u16 = 4;
 let PWR_GHOST: u16 = 8;
 let PWR_KICK: u16 = 16;
-let PWR_ALL: u16 = 31;
+let PWR_MISSILE: u16 = 32;
+let PWR_NAPALM: u16 = 64;
+let PWR_MINES: u16 = 128;
+let PWR_DRUNK: u16 = 256;
+let PWR_BAD: u16 = 512;
+let PWR_UNKICK: u16 = 1024;
+let PWR_CLASSIC: u16 = 31;
+let PWR_ALL: u16 = 2047;
+
+fn is_power(g: u8) -> bool { (g >= 3 && g <= 5) || (g >= 8 && g <= 15) }
+fn is_flame(g: u8) -> bool { g >= 16 && g < 96 }
+fn is_solid(g: u8) -> bool { g == 1 || g == 2 || g == 6 || g == 7 }
 
 fn pick_power(mask: u16, r: rng&) -> u8 {
     var opts: u8[..16] = [];
@@ -71,17 +87,27 @@ fn pick_power(mask: u16, r: rng&) -> u8 {
     if (mask & PWR_SPEED) != 0 { opts.push(5); }
     if (mask & PWR_GHOST) != 0 { opts.push(8); }
     if (mask & PWR_KICK) != 0 { opts.push(9); }
+    if (mask & PWR_MISSILE) != 0 { opts.push(10); }
+    if (mask & PWR_NAPALM) != 0 { opts.push(11); }
+    if (mask & PWR_MINES) != 0 { opts.push(12); }
+    if (mask & PWR_DRUNK) != 0 { opts.push(13); }
+    if (mask & PWR_BAD) != 0 { opts.push(14); }
+    if (mask & PWR_UNKICK) != 0 { opts.push(15); }
     if opts.len == 0 { return 0; }
     return opts[r.rand_int(opts.len)];
 }
 
 let ROBOTO: const u8[:] = embed_file("Roboto-Regular.ttf");
-struct Player { x: i64, y: i64, on: u8, alive: u8, bombs: u8, range: u8, speed: u8, wins: u8, streak: u8, bits: u8, held: u8, placed: u8, ghost: u16, kick: u8, kind: u8, name: u8[..12] }
-// dir: 0 still, 1 up, 2 down, 3 left, 4 right (a kicked bomb slides); m: ticks since its last step.
-struct Bomb { x: u8, y: u8, t: u8, range: u8, owner: u8, dir: u8, m: u8 }
+struct Player { x: i64, y: i64, on: u8, alive: u8, bombs: u8, range: u8, speed: u8, slow: u8, wins: u8, streak: u8, bits: u8, held: u8, mine_held: u8, placed: u8, ghost: u16, napalm: u16, drunk: u16, kick: u8, unkick: u8, mines: u8, missiles: u8, kind: u8, name: u8[..12] }
+// dir: 0 still, 1 up, 2 down, 3 left, 4 right (a kicked bomb slides); m: ticks since its last step; flags: bit 0 = unkickable.
+struct Bomb { x: u8, y: u8, t: u8, range: u8, owner: u8, dir: u8, m: u8, flags: u8 }
+// Proximity mine: arms down to 0, then explodes when stepped on or blasted.
+struct Mine { x: u8, y: u8, owner: u8, arm: u8 }
+// Player-steered heat-seeker missile: while active, the owner stands still wearing a headset.
+struct Missile { x: i32, y: i32, active: u8, dir: u8, t: u16 }
 // A sheep wanders at random and blocks the way like a movable block. dir: 0 up, 1 down, 2 left, 3 right, 4 grazing.
 struct Sheep { x: i64, y: i64, alive: u8, dir: u8, t: u8 }
-struct State { grid: u8[195], players: Player[4], bombs: Bomb[..16], sheep: Sheep[2], drops: u8, regrow: u8, map: u8, power_mask: u16, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
+struct State { grid: u8[195], players: Player[4], bombs: Bomb[..16], mines: Mine[..8], missiles: Missile[4], sheep: Sheep[2], drops: u8, regrow: u8, map: u8, power_mask: u16, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
 
 // UDP (udp.c): inputs and snapshots fly as datagrams when a client joins with `udp`; the WebSocket stays up for
 // joining, leaving and a slow heartbeat. Each snapshot carries its tick, so stale or reordered ones are dropped.
@@ -110,6 +136,11 @@ fn bomb_at(s: State&, tx: i64, ty: i64) -> i64 {
     return -1;
 }
 
+fn mine_at(s: State&, tx: i64, ty: i64) -> i64 {
+    for i in s.mines.len { if s.mines[i].x == tx && s.mines[i].y == ty { return i; } }
+    return -1;
+}
+
 fn hits(ax: i64, ay: i64, bx: i64, by: i64) -> bool { return abs(ax - bx) < 2 * HB && abs(ay - by) < 2 * HB; }
 
 // Does a box centered at x y hit a wall, block, or a bomb that the box (now at ox oy) is not already standing on?
@@ -117,7 +148,7 @@ fn tiles_blocked(s: State&, ox: i64, oy: i64, x: i64, y: i64) -> bool {
     for ty in (y - HB) / TILE..(y + HB - 1) / TILE + 1 {
         for tx in (x - HB) / TILE..(x + HB - 1) / TILE + 1 {
             let g = s.grid[ty * W + tx];
-            if g == 1 || g == 2 { return true; }
+            if is_solid(g) { return true; }
             let on_it = tx >= (ox - HB) / TILE && tx <= (ox + HB - 1) / TILE &&
                         ty >= (oy - HB) / TILE && ty <= (oy + HB - 1) / TILE;
             if bomb_at(s, tx, ty) >= 0 && !on_it { return true; }
@@ -177,6 +208,7 @@ fn reset_round(s: State&, r: rng&) {
     }
     for i in 4 {
         let p = s.players[i];
+        s.missiles[i] = Missile { .. };
         if p.on == 0 { continue; }
         s.players[i].x = (if i % 2 == 0 { 1 } else { W - 2 }) * TILE + TILE / 2;
         s.players[i].y = (if i < 2 { 1 } else { H - 2 }) * TILE + TILE / 2;
@@ -184,10 +216,17 @@ fn reset_round(s: State&, r: rng&) {
         s.players[i].bombs = 1;
         s.players[i].range = 2;
         s.players[i].speed = 0;
+        s.players[i].slow = 0;
         s.players[i].placed = 0;
         s.players[i].held = 0;
+        s.players[i].mine_held = 0;
         s.players[i].ghost = 0;
+        s.players[i].napalm = 0;
+        s.players[i].drunk = 0;
         s.players[i].kick = 0;
+        s.players[i].unkick = 0;
+        s.players[i].mines = 0;
+        s.players[i].missiles = 0;
     }
     for k in 2 {
         let tx = if k == 0 { 5 } else { W - 6 };
@@ -195,24 +234,27 @@ fn reset_round(s: State&, r: rng&) {
         s.sheep[k] = Sheep { tx * TILE + TILE / 2, (H / 2) * TILE + TILE / 2, 1, 4, 0 };
     }
     s.bombs.resize(0);
+    s.mines.resize(0);
     s.over = 0;
     s.dance_who = 255;
 }
 
 fn flame(s: State&, i: i64) {
     let g = s.grid[i];
-    s.grid[i] = if g == 6 { 2 } else if g == 7 || g >= 48 { 63 } else if g == 2 || g >= 32 { 47 } else { 31 };
+    s.grid[i] = if g == 6 { 2 } else if g == 7 || (g >= 48 && g < 64) { 63 } else if g == 2 || (g >= 32 && g < 48) { 47 } else { 31 };
 }
 
-// Bomb b burns: flames along four arms; blocks stop an arm, other bombs are set off.
-fn explode(s: State&, b: Bomb) {
-    flame(s, b.y * W + b.x);
+// Explosion at tile bx by with arm length rng: blocks stop an arm, other bombs are set off.
+fn explode_at(s: State&, bx: i64, by: i64, rng: i64) {
+    if bx <= 0 || bx >= W - 1 || by <= 0 || by >= H - 1 { return; }
+    flame(s, by * W + bx);
     for d in 4 {
         let dx = if d == 0 { 1 } else if d == 1 { -1 } else { 0 };
         let dy = if d == 2 { 1 } else if d == 3 { -1 } else { 0 };
-        for k in 1..b.range + 1 {
-            let tx = b.x + dx * k;
-            let ty = b.y + dy * k;
+        for k in 1..rng + 1 {
+            let tx = bx + dx * k;
+            let ty = by + dy * k;
+            if tx < 0 || tx >= W || ty < 0 || ty >= H { break; }
             let g = s.grid[ty * W + tx];
             if g == 1 { break; }
             flame(s, ty * W + tx);
@@ -222,6 +264,8 @@ fn explode(s: State&, b: Bomb) {
         }
     }
 }
+
+fn explode(s: State&, b: Bomb) { explode_at(s, b.x as i64, b.y as i64, b.range as i64); }
 
 // Index of a bomb that player i's box would run into at x y (one it is not already standing on), or -1.
 fn bomb_ahead(s: State&, i: i64, x: i64, y: i64) -> i64 {
@@ -239,7 +283,7 @@ fn bomb_ahead(s: State&, i: i64, x: i64, y: i64) -> i64 {
 // Can a sliding bomb not enter tile nx ny? Walls, crates, flames, bombs, sheep and holding players stop it.
 fn bomb_stopped(s: State&, nx: i64, ny: i64) -> bool {
     let g = s.grid[ny * W + nx];
-    if g == 1 || g == 2 || g == 6 || g == 7 || g >= 16 || bomb_at(s, nx, ny) >= 0 { return true; }
+    if is_solid(g) || is_flame(g) || bomb_at(s, nx, ny) >= 0 { return true; }
     let cx = nx * TILE + TILE / 2;
     let cy = ny * TILE + TILE / 2;
     for k in 2 {
@@ -254,28 +298,54 @@ fn bomb_stopped(s: State&, nx: i64, ny: i64) -> bool {
 }
 
 fn step_player(s: State&, i: i64) {
-    let sp = 5 + s.players[i].speed as i64;
     let bits = s.players[i].bits;
+    if s.players[i].ghost > 0 { s.players[i].ghost -= 1; }
+    if s.players[i].napalm > 0 { s.players[i].napalm -= 1; }
+    if s.players[i].drunk > 0 { s.players[i].drunk -= 1; }
+    // While guiding a heat-seeker missile, the player stands stationary wearing a headset.
+    if s.missiles[i].active != 0 {
+        if (bits & UP) != 0 { s.missiles[i].dir = 1; }
+        else if (bits & DOWN) != 0 { s.missiles[i].dir = 2; }
+        else if (bits & LEFT) != 0 { s.missiles[i].dir = 3; }
+        else if (bits & RIGHT) != 0 { s.missiles[i].dir = 4; }
+        if (bits & BOMB) != 0 && s.players[i].held == 0 { s.missiles[i].t = 0; }
+        s.players[i].held = if (bits & BOMB) != 0 { 1 } else { 0 };
+        return;
+    }
+    let sp = max(2, 5 + (s.players[i].speed as i64) - (s.players[i].slow as i64) * 2);
     var dx = 0;
     var dy = 0;
     if (bits & UP) != 0 { dy = -sp; }
     else if (bits & DOWN) != 0 { dy = sp; }
     else if (bits & LEFT) != 0 { dx = -sp; }
     else if (bits & RIGHT) != 0 { dx = sp; }
+    // Drunk power-up: deterministic random jitter you have to fight against!
+    if s.players[i].drunk > 0 && (bits & HOLD) == 0 {
+        let h = (((s.tick / 10) * 1103515245 + i * 2654435761) >> 4) & 7;
+        let jx = if h == 0 || h == 4 { 3 } else if h == 1 || h == 5 { -3 } else { 0 };
+        let jy = if h == 2 || h == 4 { 3 } else if h == 3 || h == 5 { -3 } else { 0 };
+        dx += jx;
+        dy += jy;
+    }
     if (bits & HOLD) != 0 { dx = 0; dy = 0; }
-    if s.players[i].ghost > 0 { s.players[i].ghost -= 1; }
     let x = s.players[i].x;
     let y = s.players[i].y;
-    if s.players[i].kick != 0 && (dx != 0 || dy != 0) {          // running into a bomb kicks it
+    let otx = x / TILE;
+    let oty = y / TILE;
+    if s.players[i].kick != 0 && (dx != 0 || dy != 0) {          // running into a kickable bomb kicks it
         let b = bomb_ahead(s, i, x + dx, y + dy);
-        if b >= 0 && s.bombs[b].dir == 0 {
-            s.bombs[b].dir = if dy < 0 { 1 } else if dy > 0 { 2 } else if dx < 0 { 3 } else { 4 };
+        if b >= 0 && s.bombs[b].dir == 0 && (s.bombs[b].flags & BOMB_UNKICK) == 0 {
+            s.bombs[b].dir = if abs(dy) > abs(dx) { if dy < 0 { 1 } else { 2 } } else if dx < 0 { 3 } else { 4 };
             s.bombs[b].m = 0;
         }
     }
     if dx == 0 && dy == 0 {
     } else if !blocked(s, i, x + dx, y + dy) {
         s.players[i].x = x + dx;
+        s.players[i].y = y + dy;
+    } else if dx != 0 && !blocked(s, i, x + dx, y) {
+        s.players[i].x = x + dx;
+    } else if dy != 0 && !blocked(s, i, x, y + dy) {
         s.players[i].y = y + dy;
     } else if dx != 0 {          // slide around a corner toward the row's center
         let off = (y / TILE) * TILE + TILE / 2 - y;
@@ -288,19 +358,60 @@ fn step_player(s: State&, i: i64) {
     }
     let tx = s.players[i].x / TILE;
     let ty = s.players[i].y / TILE;
+    // Napalm: leave slowly-decaying fire on the tile you just walked out of.
+    if s.players[i].napalm > 0 && (tx != otx || ty != oty) {
+        let og = s.grid[oty * W + otx];
+        if og == 0 || (og >= 64 && og < 96) { s.grid[oty * W + otx] = 95; }
+    }
     let g = s.grid[ty * W + tx];
-    if (g >= 3 && g <= 5) || g == 8 || g == 9 {
+    if is_power(g) {
         if g == 3 { s.players[i].range += 1; }
-        if g == 4 { s.players[i].bombs += 1; }
-        if g == 5 && s.players[i].speed < 3 { s.players[i].speed += 1; }
-        if g == 8 { s.players[i].ghost = GHOST; }
-        if g == 9 { s.players[i].kick = 1; }
+        else if g == 4 { s.players[i].bombs += 1; }
+        else if g == 5 {
+            if s.players[i].slow > 0 { s.players[i].slow -= 1; }
+            else if s.players[i].speed < 3 { s.players[i].speed += 1; }
+        }
+        else if g == 8 { s.players[i].ghost = GHOST; }
+        else if g == 9 { s.players[i].kick = 1; }
+        else if g == 10 { s.players[i].missiles += 1; }
+        else if g == 11 { s.players[i].napalm = NAPALM; }
+        else if g == 12 { s.players[i].mines += 2; }
+        else if g == 13 {          // Drunk: jitter to fight, plus EVERY other positive power!
+            s.players[i].drunk = DRUNK;
+            s.players[i].range = max(s.players[i].range + 2, 4);
+            s.players[i].bombs = max(s.players[i].bombs + 2, 3);
+            s.players[i].speed = 3;
+            s.players[i].slow = 0;
+            s.players[i].kick = 1;
+            s.players[i].unkick = 1;
+            s.players[i].napalm = NAPALM;
+            s.players[i].mines += 2;
+            s.players[i].missiles += 1;
+        }
+        else if g == 14 {          // Bad/Curse: longer fire, but slows you down!
+            s.players[i].range += 2;
+            if s.players[i].slow < 3 { s.players[i].slow += 1; }
+        }
+        else if g == 15 { s.players[i].unkick = 1; }
         s.grid[ty * W + tx] = 0;
     }
     let p = s.players[i];
-    if (bits & BOMB) != 0 && p.held == 0 && p.placed < p.bombs && bomb_at(s, tx, ty) < 0 {
-        s.bombs.push(Bomb { tx as u8, ty as u8, FUSE, p.range, i as u8, 0, 0 });
-        s.players[i].placed += 1;
+    let want_mine = ((bits & MINE_KEY) != 0) || ((bits & HOLD) != 0 && (bits & BOMB) != 0);
+    if want_mine && p.mine_held == 0 && p.mines > 0 && mine_at(s, tx, ty) < 0 && s.mines.len < 8 {
+        s.mines.push(Mine { tx as u8, ty as u8, i as u8, 60 });
+        s.players[i].mines -= 1;
+    }
+    s.players[i].mine_held = if want_mine { 1 } else { 0 };
+    if (bits & BOMB) != 0 && p.held == 0 && !want_mine {
+        if p.missiles > 0 && s.missiles[i].active == 0 {
+            let mdir: u8 = if (bits & UP) != 0 { 1 } else if (bits & DOWN) != 0 { 2 } else if (bits & LEFT) != 0 { 3 } else if (bits & RIGHT) != 0 { 4 } else { 2 };
+            s.missiles[i] = Missile { s.players[i].x as i32, s.players[i].y as i32, 1, mdir, 300 };
+            s.players[i].missiles -= 1;
+        } else if p.placed < p.bombs && bomb_at(s, tx, ty) < 0 {
+            let fl: u8 = if p.unkick != 0 { BOMB_UNKICK } else { 0 };
+            s.bombs.push(Bomb { tx as u8, ty as u8, FUSE, p.range, i as u8, 0, 0, fl });
+            s.players[i].placed += 1;
+        }
     }
     s.players[i].held = if (bits & BOMB) != 0 { 1 } else { 0 };
 }
@@ -352,15 +463,90 @@ fn tick(s: State&, r: rng&, n: i64) {
         }
         if !again { break; }
     }
+    // Step player-steered heat-seeker missiles.
+    for i in 4 {
+        guard s.missiles[i].active != 0 else { continue; }
+        if s.players[i].on == 0 || s.players[i].alive == 0 {
+            explode_at(s, s.missiles[i].x / TILE, s.missiles[i].y / TILE, max(3, s.players[i].range as i64));
+            s.missiles[i].active = 0;
+            continue;
+        }
+        var boom = false;
+        if s.missiles[i].t == 0 { boom = true; } else { s.missiles[i].t -= 1; }
+        let sp = 7;
+        let d = s.missiles[i].dir;
+        let dx = if d == 3 { -sp } else if d == 4 { sp } else { 0 };
+        let dy = if d == 1 { -sp } else if d == 2 { sp } else { 0 };
+        var nx = s.missiles[i].x as i64 + dx;
+        var ny = s.missiles[i].y as i64 + dy;
+        // Gently align perpendicular axis toward tile center so steering into corridors feels smooth.
+        if dx != 0 {
+            let off = (ny / TILE) * TILE + TILE / 2 - ny;
+            ny += max(-4, min(4, off));
+        } else if dy != 0 {
+            let off = (nx / TILE) * TILE + TILE / 2 - nx;
+            nx += max(-4, min(4, off));
+        }
+        let ntx = nx / TILE;
+        let nty = ny / TILE;
+        if ntx <= 0 || ntx >= W - 1 || nty <= 0 || nty >= H - 1 || is_solid(s.grid[nty * W + ntx]) || bomb_at(s, ntx, nty) >= 0 {
+            boom = true;
+        } else {
+            s.missiles[i].x = nx as i32;
+            s.missiles[i].y = ny as i32;
+            for j in 4 {
+                if j != i && s.players[j].on != 0 && s.players[j].alive != 0 && abs(s.players[j].x - nx) < HB + 12 && abs(s.players[j].y - ny) < HB + 12 { boom = true; }
+            }
+            for k in 2 {
+                if s.sheep[k].alive != 0 && abs(s.sheep[k].x - nx) < HB + 12 && abs(s.sheep[k].y - ny) < HB + 12 { boom = true; }
+            }
+        }
+        if boom {
+            explode_at(s, s.missiles[i].x / TILE, s.missiles[i].y / TILE, max(3, s.players[i].range as i64));
+            s.missiles[i].active = 0;
+        }
+    }
+    // Step proximity mines: arm down, then detonate if stepped on or hit by flame.
+    var mi = 0;
+    while mi < s.mines.len {
+        let m = s.mines[mi];
+        if m.arm > 0 {
+            s.mines[mi].arm -= 1;
+            mi += 1;
+            continue;
+        }
+        var trig = is_flame(s.grid[(m.y as i64) * W + (m.x as i64)]);
+        for j in 4 {
+            if s.players[j].on != 0 && s.players[j].alive != 0 && s.players[j].x / TILE == m.x && s.players[j].y / TILE == m.y { trig = true; }
+        }
+        for k in 2 {
+            if s.sheep[k].alive != 0 && s.sheep[k].x / TILE == m.x && s.sheep[k].y / TILE == m.y { trig = true; }
+        }
+        if trig {
+            remove_at(s.mines, mi);
+            explode_at(s, m.x as i64, m.y as i64, max(2, s.players[m.owner].range as i64));
+        } else {
+            mi += 1;
+        }
+    }
     if n % 2 == 0 {
         for i in W * H {
             let g = s.grid[i];
-            if g < 16 { continue; }
+            if g < 16 || g >= 64 { continue; }
             if g % 16 > 0 { s.grid[i] = g - 1; }
             else if g >= 48 || (g >= 32 && r.rand_int(100) < s.drops as i64) {
                 s.grid[i] = pick_power(s.power_mask, r);
             }
             else { s.grid[i] = 0; }
+        }
+    }
+    // Napalm flames (64..95) decay 3x slower than normal flames.
+    if n % 6 == 0 {
+        for i in W * H {
+            let g = s.grid[i];
+            if g >= 64 && g < 96 {
+                s.grid[i] = if g > 64 { g - 1 } else { 0 };
+            }
         }
     }
     // Randomly spawn new blocks when the arena gets too empty, at a host-controllable rate.
@@ -376,7 +562,7 @@ fn tick(s: State&, r: rng&, n: i64) {
                 for tries in 24 {
                     let tx = 1 + r.rand_int(W - 2);
                     let ty = 1 + r.rand_int(H - 2);
-                    if s.grid[ty * W + tx] != 0 || bomb_at(s, tx, ty) >= 0 { continue; }
+                    if s.grid[ty * W + tx] != 0 || bomb_at(s, tx, ty) >= 0 || mine_at(s, tx, ty) >= 0 { continue; }
                     var clear = true;
                     for i in 4 {
                         guard s.players[i].on != 0 && s.players[i].alive != 0 else { continue; }
@@ -395,7 +581,7 @@ fn tick(s: State&, r: rng&, n: i64) {
         }
     }
     for k in 2 {
-        if s.sheep[k].alive != 0 && s.grid[(s.sheep[k].y / TILE) * W + s.sheep[k].x / TILE] >= 16 { s.sheep[k].alive = 0; }
+        if s.sheep[k].alive != 0 && is_flame(s.grid[(s.sheep[k].y / TILE) * W + s.sheep[k].x / TILE]) { s.sheep[k].alive = 0; }
     }
     var joined = 0;
     var alive = 0;
@@ -404,7 +590,7 @@ fn tick(s: State&, r: rng&, n: i64) {
         guard s.players[i].on != 0 else { continue; }
         joined += 1;
         if s.players[i].alive != 0 {
-            if s.grid[(s.players[i].y / TILE) * W + s.players[i].x / TILE] >= 16 { s.players[i].alive = 0; }
+            if is_flame(s.grid[(s.players[i].y / TILE) * W + s.players[i].x / TILE]) { s.players[i].alive = 0; }
             else { alive += 1; last = i; }
         }
     }
@@ -801,13 +987,31 @@ fn hear(prev: State&, s: State&, sfx: Sfx, fx: Fx&) {
         else if prev.grid[i] == 0 && (s.grid[i] == 2 || s.grid[i] == 6 || s.grid[i] == 7) { audio::play(sfx.clank, 0.3, pan((i % W) * TILE), 0.7, false); }
     }
     for k in 2 { if prev.sheep[k].alive != 0 && s.sheep[k].alive == 0 { audio::play(sfx.die, 0.6, pan(s.sheep[k].x), 1.6, false); } }
+    for i in prev.mines.len {
+        if mine_at(s, prev.mines[i].x, prev.mines[i].y) < 0 {
+            audio::play(sfx.boom, 0.9, pan(prev.mines[i].x * TILE), 1.1, false);
+            fx.shake = 9.0;
+        }
+    }
+    for i in 4 {
+        if prev.missiles[i].active != 0 && s.missiles[i].active == 0 {
+            audio::play(sfx.boom, 0.95, pan(prev.missiles[i].x), 0.85, false);
+            fx.shake = 11.0;
+        }
+        if prev.missiles[i].active == 0 && s.missiles[i].active != 0 {
+            audio::play(sfx.place, 0.7, pan(s.missiles[i].x), 1.6, false);
+        }
+    }
     for i in 4 {
         let a = prev.players[i];
         let b = s.players[i];
         guard a.on != 0 && b.on != 0 else { continue; }
         let vol = if i == s.you { 0.8 } else { 0.4 };
         if a.alive != 0 && b.alive == 0 { audio::play(sfx.die, 0.8, pan(b.x), 1.0, false); }
-        if b.range + b.bombs + b.speed > a.range + a.bombs + a.speed || (a.ghost == 0 && b.ghost > 0) || (a.kick == 0 && b.kick > 0) { audio::play(sfx.pickup, vol, pan(b.x), 1.0, false); }
+        let got_pwr = b.range + b.bombs + b.speed + b.mines + b.missiles > a.range + a.bombs + a.speed + a.mines + a.missiles ||
+                      (a.ghost == 0 && b.ghost > 0) || (a.kick == 0 && b.kick > 0) || (a.unkick == 0 && b.unkick > 0) ||
+                      (a.napalm == 0 && b.napalm > 0) || (a.drunk == 0 && b.drunk > 0);
+        if got_pwr { audio::play(sfx.pickup, vol, pan(b.x), if b.slow > a.slow { 0.65 } else { 1.0 }, false); }
         if b.wins > a.wins { audio::play(sfx.win, 0.8, 0.0, 1.0, false); }
     }
 }
@@ -980,7 +1184,17 @@ fn draw_gift(c: ui::Context, x: f32, y: f32, t: f32, tm: f32) {
 
 fn draw_power(c: ui::Context, g: u8, x: f32, y0: f32, t: f32, tm: f32) {
     let y = y0 + sin(tm * 4.0 + x) * t * 0.04;
-    let plate = if g == 3 { ui::rgb(200, 60, 40) } else if g == 4 { ui::rgb(70, 70, 84) } else if g == 8 { ui::rgb(120, 80, 190) } else if g == 9 { ui::rgb(205, 125, 40) } else { ui::rgb(30, 150, 205) };
+    let plate = if g == 3 { ui::rgb(200, 60, 40) }
+                else if g == 4 { ui::rgb(70, 70, 84) }
+                else if g == 8 { ui::rgb(120, 80, 190) }
+                else if g == 9 { ui::rgb(205, 125, 40) }
+                else if g == 10 { ui::rgb(210, 45, 75) }
+                else if g == 11 { ui::rgb(220, 86, 20) }
+                else if g == 12 { ui::rgb(64, 96, 68) }
+                else if g == 13 { ui::rgb(185, 55, 165) }
+                else if g == 14 { ui::rgb(96, 42, 112) }
+                else if g == 15 { ui::rgb(52, 74, 98) }
+                else { ui::rgb(30, 150, 205) };
     ui::fill_circle(c, ui::rect(x + t * 0.04, y + t * 0.04, t * 0.92, t * 0.92), ui::rgba(255, 255, 255, 40));
     ui::fill_rect(c, ui::rect(x + t * 0.14, y + t * 0.14, t * 0.72, t * 0.72), t * 0.18, plate);
     ui::stroke_rect(c, ui::rect(x + t * 0.14, y + t * 0.14, t * 0.72, t * 0.72), t * 0.18, 2.0, ui::rgb(255, 255, 255));
@@ -1004,6 +1218,39 @@ fn draw_power(c: ui::Context, g: u8, x: f32, y0: f32, t: f32, tm: f32) {
         ui::fill_rect(c, ui::rect(x + t * 0.3, y + t * 0.64, t * 0.44, t * 0.06), 1.0, ui::rgb(70, 40, 20));
         ui::stroke_line(c, x + t * 0.2, y + t * 0.42, x + t * 0.3, y + t * 0.46, 2.0, ui::rgb(255, 235, 90));
         ui::stroke_line(c, x + t * 0.2, y + t * 0.56, x + t * 0.3, y + t * 0.56, 2.0, ui::rgb(255, 235, 90));
+    } else if g == 10 {  // heat-seeker missile
+        ui::fill_triangle(c, x + t * 0.74, y + t * 0.26, x + t * 0.56, y + t * 0.58, x + t * 0.42, y + t * 0.44, ui::rgb(255, 255, 255));
+        ui::fill_triangle(c, x + t * 0.74, y + t * 0.26, x + t * 0.65, y + t * 0.42, x + t * 0.58, y + t * 0.35, ui::rgb(255, 70, 50));
+        ui::stroke_line(c, x + t * 0.3, y + t * 0.7, x + t * 0.46, y + t * 0.54, 4.0, ui::rgb(255, 215, 70));
+        ui::stroke_circle(c, ui::rect(x + t * 0.22, y + t * 0.22, t * 0.56, t * 0.56), 1.5, ui::rgba(255, 255, 255, 160));
+    } else if g == 11 {  // napalm (fire trail drops)
+        for k in 3 {
+            let xx = x + t * (0.28 + 0.22 * k);
+            let yy = y + t * (0.64 - 0.08 * k);
+            ui::fill_circle(c, ui::rect(xx - t * 0.1, yy - t * 0.1, t * 0.2, t * 0.2), ui::rgb(255, 195, 50));
+            ui::fill_triangle(c, xx, yy - t * 0.24, xx + t * 0.1, yy, xx - t * 0.1, yy, ui::rgb(255, 240, 120));
+        }
+    } else if g == 12 {  // proximity mine
+        ui::fill_circle(c, ui::rect(x + t * 0.26, y + t * 0.32, t * 0.48, t * 0.4), ui::rgb(35, 38, 42));
+        ui::stroke_circle(c, ui::rect(x + t * 0.26, y + t * 0.32, t * 0.48, t * 0.4), 2.0, ui::rgb(180, 190, 195));
+        ui::fill_circle(c, ui::rect(x + t * 0.42, y + t * 0.44, t * 0.16, t * 0.14), ui::rgb(255, 65, 55));
+    } else if g == 13 {  // drunk (bubbly mug / potion + stars)
+        ui::fill_rect(c, ui::rect(x + t * 0.32, y + t * 0.34, t * 0.32, t * 0.4), 4.0, ui::rgb(255, 200, 60));
+        ui::fill_rect(c, ui::rect(x + t * 0.3, y + t * 0.26, t * 0.36, t * 0.12), 4.0, ui::rgb(255, 255, 255));
+        ui::stroke_rect(c, ui::rect(x + t * 0.62, y + t * 0.42, t * 0.12, t * 0.2), 3.0, 2.5, ui::rgb(255, 255, 255));
+        ui::fill_circle(c, ui::rect(x + t * 0.24, y + t * 0.22, t * 0.09, t * 0.09), ui::rgb(255, 160, 245));
+        ui::fill_circle(c, ui::rect(x + t * 0.66, y + t * 0.2, t * 0.08, t * 0.08), ui::rgb(255, 240, 120));
+    } else if g == 14 {  // bad / curse (skull + green-purple glow)
+        ui::fill_circle(c, ui::rect(x + t * 0.3, y + t * 0.24, t * 0.4, t * 0.38), ui::rgb(190, 245, 145));
+        ui::fill_rect(c, ui::rect(x + t * 0.38, y + t * 0.56, t * 0.24, t * 0.16), 2.0, ui::rgb(190, 245, 145));
+        ui::fill_circle(c, ui::rect(x + t * 0.37, y + t * 0.37, t * 0.09, t * 0.1), ui::rgb(45, 18, 56));
+        ui::fill_circle(c, ui::rect(x + t * 0.54, y + t * 0.37, t * 0.09, t * 0.1), ui::rgb(45, 18, 56));
+    } else if g == 15 {  // unkickable bomb (iron anchor)
+        ui::stroke_circle(c, ui::rect(x + t * 0.42, y + t * 0.22, t * 0.16, t * 0.16), 2.5, ui::rgb(225, 235, 245));
+        ui::stroke_line(c, x + t * 0.5, y + t * 0.38, x + t * 0.5, y + t * 0.74, 3.0, ui::rgb(225, 235, 245));
+        ui::stroke_line(c, x + t * 0.32, y + t * 0.46, x + t * 0.68, y + t * 0.46, 3.0, ui::rgb(225, 235, 245));
+        ui::stroke_line(c, x + t * 0.28, y + t * 0.64, x + t * 0.5, y + t * 0.76, 3.0, ui::rgb(225, 235, 245));
+        ui::stroke_line(c, x + t * 0.72, y + t * 0.64, x + t * 0.5, y + t * 0.76, 3.0, ui::rgb(225, 235, 245));
     } else {             // bolt
         ui::fill_triangle(c, x + t * 0.56, y + t * 0.2, x + t * 0.34, y + t * 0.52, x + t * 0.52, y + t * 0.52, ui::rgb(255, 235, 90));
         ui::fill_triangle(c, x + t * 0.48, y + t * 0.46, x + t * 0.68, y + t * 0.46, x + t * 0.44, y + t * 0.8, ui::rgb(255, 235, 90));
@@ -1011,6 +1258,15 @@ fn draw_power(c: ui::Context, g: u8, x: f32, y0: f32, t: f32, tm: f32) {
 }
 
 fn draw_flame(c: ui::Context, g: u8, x: f32, y: f32, t: f32, tm: f32) {
+    if g >= 64 && g < 96 { // slowly-decaying napalm fire
+        let life = ((g - 64) as f32 + 1.0) / 32.0;
+        let fl = 0.05 * sin(tm * 24.0 + x * 0.3 + y * 0.2);
+        let a = (110.0 + 135.0 * life) as i64;
+        ui::fill_rect(c, ui::rect(x + t * 0.04, y + t * 0.04, t * 0.92, t * 0.92), t * 0.32, ui::rgba(205, 35, 15, a));
+        ui::fill_rect(c, ui::rect(x + t * (0.16 - fl), y + t * (0.16 - fl), t * (0.68 + 2.0 * fl), t * (0.68 + 2.0 * fl)), t * 0.28, ui::rgba(255, 115, 20, a));
+        ui::fill_circle(c, ui::rect(x + t * 0.32, y + t * 0.32, t * 0.36, t * 0.36), ui::rgba(255, 225, 90, a));
+        return;
+    }
     let life = ((g % 16) as f32 + 1.0) / 16.0;
     let fl = 0.04 * sin(tm * 40.0 + x);
     let a = (120.0 + 135.0 * life) as i64;
@@ -1337,15 +1593,91 @@ fn draw_bomb(c: ui::Context, s: State&, b: Bomb, ox: f32, oy: f32, t: f32, tm: f
         if b.dir == 1 { cy += sl; } else if b.dir == 2 { cy -= sl; } else if b.dir == 3 { cx += sl; } else { cx -= sl; }
     }
     let kd = s.players[b.owner].kind;
-    if kd == CHAR_GOOSE { draw_egg(c, b, cx, cy, k, tm); return; }
-    if kd == CHAR_SQUIRREL { draw_acorn(c, b, cx, cy, k, tm); return; }
-    if kd == CHAR_BABY { draw_diaper(c, b, cx, cy, k, tm); return; }
-    if kd == CHAR_COW { draw_patty(c, b, cx, cy, k, tm); return; }
-    if kd == CHAR_PIG { draw_bacon(c, b, cx, cy, k, tm); return; }
-    if kd == CHAR_FARMER { draw_haybale(c, b, cx, cy, k, tm); return; }
-    ui::fill_circle(c, ui::rect(cx - k * 0.5, cy + k * 0.2, k, k * 0.4), ui::rgba(0, 0, 0, 90));
-    ui::fill_circle(c, ui::rect(cx - k * 0.5, cy - k * 0.5, k, k), if b.t < 45 && (b.t / 6) % 2 == 0 { ui::rgb(120, 25, 25) } else { ui::rgb(22, 22, 30) });
-    ui::stroke_circle(c, ui::rect(cx - k * 0.5, cy - k * 0.5, k, k), 3.0, col(b.owner));
+    if kd == CHAR_GOOSE { draw_egg(c, b, cx, cy, k, tm); }
+    else if kd == CHAR_SQUIRREL { draw_acorn(c, b, cx, cy, k, tm); }
+    else if kd == CHAR_BABY { draw_diaper(c, b, cx, cy, k, tm); }
+    else if kd == CHAR_COW { draw_patty(c, b, cx, cy, k, tm); }
+    else if kd == CHAR_PIG { draw_bacon(c, b, cx, cy, k, tm); }
+    else if kd == CHAR_FARMER { draw_haybale(c, b, cx, cy, k, tm); }
+    else {
+        ui::fill_circle(c, ui::rect(cx - k * 0.5, cy + k * 0.2, k, k * 0.4), ui::rgba(0, 0, 0, 90));
+        ui::fill_circle(c, ui::rect(cx - k * 0.5, cy - k * 0.5, k, k), if b.t < 45 && (b.t / 6) % 2 == 0 { ui::rgb(120, 25, 25) } else { ui::rgb(22, 22, 30) });
+        ui::stroke_circle(c, ui::rect(cx - k * 0.5, cy - k * 0.5, k, k), 3.0, col(b.owner));
+    }
+    // Unkickable bomb: heavy iron anchor rim + four steel studs
+    if (b.flags & BOMB_UNKICK) != 0 {
+        ui::stroke_circle(c, ui::rect(cx - k * 0.54, cy - k * 0.54, k * 1.08, k * 1.08), 3.5, ui::rgb(50, 60, 74));
+        for st in 4 {
+            let a = st as f32 * 1.5708 + 0.7854;
+            ui::fill_circle(c, ui::rect(cx + cos(a) * k * 0.52 - 3.5, cy + sin(a) * k * 0.52 - 3.5, 7.0, 7.0), ui::rgb(190, 205, 220));
+        }
+    }
+}
+
+fn draw_mine(c: ui::Context, s: State&, m: Mine, ox: f32, oy: f32, t: f32, tm: f32) {
+    let cx = ox + (m.x + 0.5) * t;
+    let cy = oy + (m.y + 0.5) * t;
+    let r = t * 0.28;
+    let mine_owner = m.owner == s.you;
+    if m.arm > 0 {
+        // Still arming: visible to everyone with blinking red LED
+        ui::fill_circle(c, ui::rect(cx - r, cy - r * 0.75, r * 2.0, r * 1.5), ui::rgb(46, 52, 58));
+        ui::stroke_circle(c, ui::rect(cx - r, cy - r * 0.75, r * 2.0, r * 1.5), 2.0, col(m.owner));
+        let blink = (m.arm / 6) % 2 == 0;
+        ui::fill_circle(c, ui::rect(cx - r * 0.3, cy - r * 0.25, r * 0.6, r * 0.5), if blink { ui::rgb(255, 60, 45) } else { ui::rgb(140, 30, 30) });
+    } else if mine_owner {
+        // Armed: clearly marked for owner
+        ui::fill_circle(c, ui::rect(cx - r, cy - r * 0.75, r * 2.0, r * 1.5), ui::rgba(40, 44, 50, 170));
+        ui::stroke_circle(c, ui::rect(cx - r * 1.15, cy - r * 0.9, r * 2.3, r * 1.8), 2.0, col(m.owner));
+        ui::fill_circle(c, ui::rect(cx - r * 0.22, cy - r * 0.2, r * 0.44, r * 0.4), ui::rgba(255, 60, 45, 210));
+    } else {
+        // Armed: stealthy subtle bump to enemies!
+        ui::fill_circle(c, ui::rect(cx - r * 0.75, cy - r * 0.55, r * 1.5, r * 1.1), ui::rgba(30, 34, 40, 62));
+        if sin(tm * 5.0 + m.x as f32) > 0.85 {
+            ui::fill_circle(c, ui::rect(cx - 2.5, cy - 2.5, 5.0, 5.0), ui::rgba(255, 70, 50, 110));
+        }
+    }
+}
+
+fn draw_missile(c: ui::Context, m: Missile, owner: i64, ox: f32, oy: f32, t: f32, tm: f32) {
+    let cx = ox + (m.x as f32) / TILE * t;
+    let cy = oy + (m.y as f32) / TILE * t;
+    let k = t * 0.65;
+    let dx: f32 = if m.dir == 3 { -1.0 } else if m.dir == 4 { 1.0 } else { 0.0 };
+    let dy: f32 = if m.dir == 1 { -1.0 } else if m.dir == 2 { 1.0 } else { 0.0 };
+    let px = -dy;
+    let py = dx;
+    // Rocket exhaust flame behind missile
+    let fl = (0.35 + 0.14 * sin(tm * 45.0)) * k;
+    ui::fill_circle(c, ui::rect(cx - dx * k * 0.45 - fl * 0.6, cy - dy * k * 0.45 - fl * 0.6, fl * 1.2, fl * 1.2), ui::rgba(255, 130, 30, 210));
+    ui::fill_circle(c, ui::rect(cx - dx * k * 0.35 - fl * 0.35, cy - dy * k * 0.35 - fl * 0.35, fl * 0.7, fl * 0.7), ui::rgb(255, 245, 150));
+    // Target crosshair ring around missile
+    let rr = k * (0.68 + 0.06 * sin(tm * 18.0));
+    ui::stroke_circle(c, ui::rect(cx - rr, cy - rr, rr * 2.0, rr * 2.0), 1.8, ui::rgba(255, 70, 60, 180));
+    // Missile body + red nose cone + fins
+    ui::stroke_line(c, cx - dx * k * 0.3, cy - dy * k * 0.3, cx + dx * k * 0.25, cy + dy * k * 0.25, k * 0.34, ui::rgb(240, 244, 250));
+    ui::fill_triangle(c, cx + dx * k * 0.58, cy + dy * k * 0.58,
+                         cx + dx * k * 0.16 + px * k * 0.2, cy + dy * k * 0.16 + py * k * 0.2,
+                         cx + dx * k * 0.16 - px * k * 0.2, cy + dy * k * 0.16 - py * k * 0.2, ui::rgb(235, 50, 45));
+    ui::fill_triangle(c, cx - dx * k * 0.42 + px * k * 0.34, cy - dy * k * 0.42 + py * k * 0.34,
+                         cx - dx * k * 0.14, cy - dy * k * 0.14,
+                         cx - dx * k * 0.42 - px * k * 0.34, cy - dy * k * 0.42 - py * k * 0.34, col(owner));
+}
+
+// Little VR/RC headset + blinking antenna worn while steering a heat-seeker missile.
+fn draw_headset(c: ui::Context, x: f32, y: f32, k: f32, tm: f32) {
+    let band = ui::rgb(42, 48, 62);
+    // Headband + earmuffs
+    ui::stroke_circle(c, ui::rect(x - k * 0.46, y - k * 0.58, k * 0.92, k * 0.52), 3.0, band);
+    ui::fill_rect(c, ui::rect(x - k * 0.54, y - k * 0.34, k * 0.16, k * 0.28), 4.0, band);
+    ui::fill_rect(c, ui::rect(x + k * 0.38, y - k * 0.34, k * 0.16, k * 0.28), 4.0, band);
+    // Glowing cyan VR visor
+    ui::fill_rect(c, ui::rect(x - k * 0.36, y - k * 0.32, k * 0.72, k * 0.22), 5.0, ui::rgb(30, 38, 52));
+    ui::fill_rect(c, ui::rect(x - k * 0.3, y - k * 0.28, k * 0.6, k * 0.14), 3.0, ui::rgb(70, 235, 255));
+    // Antenna with blinking red beacon
+    ui::stroke_line(c, x + k * 0.44, y - k * 0.34, x + k * 0.5, y - k * 0.78, 2.5, ui::rgb(210, 220, 235));
+    let on = sin(tm * 20.0) > 0.0;
+    ui::fill_circle(c, ui::rect(x + k * 0.44, y - k * 0.84, k * 0.12, k * 0.12), if on { ui::rgb(255, 60, 50) } else { ui::rgb(120, 30, 30) });
 }
 
 fn draw_character(c: ui::Context, kind: u8, owner: i64, x: f32, y: f32, k: f32, fx: f32, fy: f32, walk: f32) {
@@ -1376,8 +1708,24 @@ fn draw_player(c: ui::Context, s: State&, i: i64, x: f32, y: f32, t: f32, tm: f3
         return;
     }
     if (bits & HOLD) != 0 { ui::stroke_rect(c, ui::rect(x - k * 0.62, y - k * 0.62, k * 1.24, k * 1.24), k * 0.3, 3.0, ui::rgba(255, 255, 255, 190)); }
+    if s.players[i].napalm > 0 {
+        ui::stroke_circle(c, ui::rect(x - k * 0.62, y - k * 0.56, k * 1.24, k * 1.2), 3.0, ui::rgba(255, 110, 25, 200));
+    }
+    if s.players[i].slow > 0 {
+        ui::stroke_circle(c, ui::rect(x - k * 0.58, y + k * 0.16, k * 1.16, k * 0.44), 3.0, ui::rgba(160, 75, 210, 200));
+    }
     ui::fill_circle(c, ui::rect(x - k * 0.5, y + k * 0.3, k, k * 0.4), ui::rgba(0, 0, 0, 110));
-    draw_character(c, s.players[i].kind, i, x, y, k, fx, fy, walk);
+    let sway = if s.players[i].drunk > 0 { sin(tm * 16.0 + i as f32) * k * 0.1 } else { 0.0 };
+    draw_character(c, s.players[i].kind, i, x + sway, y, k, fx, fy, walk);
+    if s.missiles[i].active != 0 { draw_headset(c, x, y, k, tm); }
+    if s.players[i].drunk > 0 {
+        for b in 3 {
+            let a = tm * 6.0 + b as f32 * 2.094;
+            let bx = x + cos(a) * k * 0.48;
+            let by = y - k * 0.58 + sin(a) * k * 0.16;
+            ui::fill_circle(c, ui::rect(bx - 4.0, by - 4.0, 8.0, 8.0), if b % 2 == 0 { ui::rgb(255, 120, 235) } else { ui::rgb(255, 235, 90) });
+        }
+    }
     marker(c, i, x, y - k * 0.78 + walk, t * 0.13);
     if s.players[i].name.len > 0 {
         let nw = ui::text_width(ui::font(c), s.players[i].name[..]);
@@ -1474,10 +1822,11 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
                 else if g == 2 { draw_brick(hud, s.map, x, y, t); }
                 else if g == 6 { draw_steel(hud, x, y, t); }
                 else if g == 7 { draw_gift(hud, x, y, t, tm); }
-                else if (g >= 3 && g <= 5) || g == 8 || g == 9 { draw_power(hud, g, x, y, t, tm); }
-                else if g >= 16 { draw_flame(hud, g, x, y, t, tm); }
+                else if is_power(g) { draw_power(hud, g, x, y, t, tm); }
+                else if is_flame(g) { draw_flame(hud, g, x, y, t, tm); }
             }
         }
+        for m in s.mines { draw_mine(hud, s, m, ox, oy, t, tm); }
         for b in s.bombs { draw_bomb(hud, s, b, ox, oy, t, tm); }
         for k in 2 {
             if s.sheep[k].alive != 0 { draw_sheep(hud, s.sheep[k], ox + s.sheep[k].x as f32 / TILE * t, oy + s.sheep[k].y as f32 / TILE * t, t, tm); }
@@ -1491,6 +1840,24 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
             if s.players[i].on != 0 && s.players[i].alive != 0 {
                 draw_player(hud, s, i, ox + shown[i].x / TILE * t, oy + shown[i].y / TILE * t, t, tm);
             }
+        }
+        for i in 4 {
+            if s.missiles[i].active != 0 { draw_missile(hud, s.missiles[i], i, ox, oy, t, tm); }
+        }
+        // Bottom status strip for the local player's active special power-ups
+        let me = s.players[s.you];
+        var st: u8[>..] = [];
+        if s.missiles[s.you].active != 0 { st.append("GUIDING MISSILE (Arrows/WASD steer, Space detonate)  "); }
+        else if me.missiles > 0 { format(st, "Missile x", me.missiles, " [Space]  "); }
+        if me.mines > 0 { format(st, "Mines x", me.mines, " [E/X]  "); }
+        if me.napalm > 0 { st.append("NAPALM  "); }
+        if me.drunk > 0 { st.append("DRUNK!  "); }
+        if me.unkick != 0 { st.append("AnchorBombs  "); }
+        if me.slow > 0 { st.append("CURSED(Slow+Range)  "); }
+        if st.len > 0 && me.alive != 0 {
+            let sw0 = ui::text_width(ui::font(hud), st);
+            ui::fill_rect(hud, ui::rect((size.x as f32 - sw0) * 0.5 - 12.0, size.y as f32 - 30.0, sw0 + 24.0, 26.0), 6.0, ui::rgba(10, 12, 20, 190));
+            text(hud, (size.x as f32 - sw0) * 0.5, size.y as f32 - 28.0, st, ui::rgb(255, 225, 110));
         }
         ui::fill_rect(hud, ui::rect(0, 0, size.x, top - 10.0), 0.0, ui::rgba(10, 12, 20, 200));
         var x: f32 = 16.0;
@@ -1554,6 +1921,7 @@ fn keys() -> u8 {
     if gfx::key_down("Right") || gfx::key_down("D") { b |= RIGHT; }
     if gfx::key_down("Space") { b |= BOMB; }
     if gfx::key_down("Left Shift") || gfx::key_down("Right Shift") { b |= HOLD; }
+    if gfx::key_down("E") || gfx::key_down("X") { b |= MINE_KEY; }
     return b;
 }
 
@@ -1872,8 +2240,8 @@ fn main() {
         }
         ui::end(panel);
         if host_open && mode != "join" {
-            let hw: f32 = 460.0;
-            let hh: f32 = 420.0;
+            let hw: f32 = 490.0;
+            let hh: f32 = 520.0;
             if ui::begin(menu, "Host Settings", ui::rect((sz.x as f32 - hw) * 0.5, (sz.y as f32 - hh) * 0.5, hw, hh), ui::WINDOW_BORDER | ui::WINDOW_TITLE | ui::WINDOW_NO_SCROLLBAR) {
                 ui::layout_row_dynamic(menu, 22.0, 1);
                 ui::label(menu, "Map (changes music & theme):", ui::TEXT_LEFT);
@@ -1886,38 +2254,61 @@ fn main() {
                 var dlbl: u8[>..] = [];
                 format(dlbl, "Power-Up Drop Rate: ", s.drops, "%");
                 ui::label(menu, dlbl, ui::TEXT_LEFT);
-                ui::layout_row_dynamic(menu, 22.0, 1);
+                ui::layout_row_dynamic(menu, 20.0, 1);
                 s.drops = ui::slide_int(menu, 0, s.drops as i64, 100, 1) as u8;
                 ui::layout_row_dynamic(menu, 22.0, 1);
                 var rlbl: u8[>..] = [];
                 if s.regrow == 0 { rlbl.append("Wall Regrowth when Empty: OFF"); }
                 else { format(rlbl, "Wall Regrowth when Empty: ", s.regrow, "%"); }
                 ui::label(menu, rlbl, ui::TEXT_LEFT);
-                ui::layout_row_dynamic(menu, 22.0, 1);
+                ui::layout_row_dynamic(menu, 20.0, 1);
                 s.regrow = ui::slide_int(menu, 0, s.regrow as i64, 100, 5) as u8;
-                ui::layout_row_dynamic(menu, 22.0, 3);
+                let prat: f32[4] = [0.40, 0.20, 0.22, 0.18];
+                ui::layout_row(menu, ui::DYNAMIC, 24.0, prat);
                 ui::label(menu, "Enabled Power-Ups:", ui::TEXT_LEFT);
                 if ui::button_label(menu, "All") { s.power_mask = PWR_ALL; }
+                if ui::button_label(menu, "Classic") { s.power_mask = PWR_CLASSIC; }
                 if ui::button_label(menu, "None") { s.power_mask = 0; }
                 var p0 = (s.power_mask & PWR_FLAME) != 0;
                 var p1 = (s.power_mask & PWR_BOMB) != 0;
                 var p2 = (s.power_mask & PWR_SPEED) != 0;
                 var p3 = (s.power_mask & PWR_GHOST) != 0;
                 var p4 = (s.power_mask & PWR_KICK) != 0;
-                ui::layout_row_dynamic(menu, 24.0, 2);
+                var p5 = (s.power_mask & PWR_MISSILE) != 0;
+                var p6 = (s.power_mask & PWR_NAPALM) != 0;
+                var p7 = (s.power_mask & PWR_MINES) != 0;
+                var p8 = (s.power_mask & PWR_DRUNK) != 0;
+                var p9 = (s.power_mask & PWR_BAD) != 0;
+                var p10 = (s.power_mask & PWR_UNKICK) != 0;
+                ui::layout_row_dynamic(menu, 23.0, 2);
                 ui::checkbox_label(menu, "Flame (Range+)", p0);
                 ui::checkbox_label(menu, "Extra Bomb", p1);
-                ui::layout_row_dynamic(menu, 24.0, 2);
+                ui::layout_row_dynamic(menu, 23.0, 2);
                 ui::checkbox_label(menu, "Speed Bolt", p2);
                 ui::checkbox_label(menu, "Ghost (Invisible)", p3);
-                ui::layout_row_dynamic(menu, 24.0, 2);
+                ui::layout_row_dynamic(menu, 23.0, 2);
                 ui::checkbox_label(menu, "Kick Boot", p4);
+                ui::checkbox_label(menu, "Heat-Seeker Missile", p5);
+                ui::layout_row_dynamic(menu, 23.0, 2);
+                ui::checkbox_label(menu, "Napalm Fire Trail", p6);
+                ui::checkbox_label(menu, "Proximity Mines", p7);
+                ui::layout_row_dynamic(menu, 23.0, 2);
+                ui::checkbox_label(menu, "Drunk (All + Jitter)", p8);
+                ui::checkbox_label(menu, "Curse (Slow + Range)", p9);
+                ui::layout_row_dynamic(menu, 23.0, 2);
+                ui::checkbox_label(menu, "Unkickable Bombs", p10);
                 var nm: u16 = 0;
                 if p0 { nm |= PWR_FLAME; }
                 if p1 { nm |= PWR_BOMB; }
                 if p2 { nm |= PWR_SPEED; }
                 if p3 { nm |= PWR_GHOST; }
                 if p4 { nm |= PWR_KICK; }
+                if p5 { nm |= PWR_MISSILE; }
+                if p6 { nm |= PWR_NAPALM; }
+                if p7 { nm |= PWR_MINES; }
+                if p8 { nm |= PWR_DRUNK; }
+                if p9 { nm |= PWR_BAD; }
+                if p10 { nm |= PWR_UNKICK; }
                 s.power_mask = nm;
                 ui::layout_row_dynamic(menu, 30.0, 2);
                 if ui::button_label(menu, "New Round") { reset_round(s, r); host_open = false; }
