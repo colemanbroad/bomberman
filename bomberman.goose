@@ -276,6 +276,57 @@ fn make_sfx(r: rng&) -> Sfx {
           synth(r, 0.6, 400.0, 60.0, 0.1, 3.0), synth(r, 0.7, 523.0, 1318.0, 0.0, 2.0), synth(r, 0.1, 1200.0, 800.0, 0.5, 12.0) }
 }
 
+// Adds midi note m at sample `at` for n samples: kind 0 is a 50% pulse, 1 a 25% pulse, 2 a triangle.
+fn voice(pcm: f32[>..]&, at: i64, n: i64, m: i64, kind: i64, vol: f64) {
+    let f = 440.0 * exp(((m - 69) as f64) / 12.0 * 0.6931471805599453);
+    for i in n {
+        let x = f * (i as f64) / 48000.0;
+        let ph = x - floor(x);
+        let w = if kind == 0 { if ph < 0.5 { 1.0 } else { -1.0 } }
+                else if kind == 1 { if ph < 0.25 { 1.0 } else { -1.0 } }
+                else { if ph < 0.5 { 4.0 * ph - 1.0 } else { 3.0 - 4.0 * ph } };
+        pcm[at + i] += (w * vol * exp(-3.0 * (i as f64) / (n as f64)) * min(1.0, (i as f64) / 100.0)) as f32;
+    }
+}
+
+// Adds a drum hit: noise (snare, hat) or a falling sine (kick).
+fn drum(r: rng&, pcm: f32[>..]&, at: i64, n: i64, kick: bool, vol: f64) {
+    var phase = 0.0;
+    for i in n {
+        let u = (i as f64) / (n as f64);
+        phase += TAU * (150.0 - 105.0 * u) / 48000.0;
+        let w = if kick { sin(phase) } else { r.rand_flt() * 2.0 - 1.0 };
+        pcm[at + i] += (w * vol * exp(-5.0 * u)) as f32;
+    }
+}
+
+// A looping chiptune in A minor (Am F C G): pulse-wave arpeggios, a triangle bass and a drum beat; 8 bars of 8 steps.
+fn make_music(r: rng&) -> audio::Sound {
+    let step = 9600;
+    var pcm: f32[>..] = [];
+    pcm.resize(64 * step, 0.0);
+    let roots: i64[4] = [45, 41, 48, 43];
+    let tones: i64[12] = [69, 72, 76, 65, 69, 72, 67, 72, 76, 67, 71, 74];
+    let pat: i64[8] = [0, 1, 2, 1, 0, 2, 1, 2];
+    for b in 8 {
+        let c = (b / 2) % 4;
+        for s in 8 {
+            let at = (b * 8 + s) * step;
+            let n = step * 9 / 10;
+            voice(pcm, at, n, roots[c] + (s % 2) * 12, 2, 0.5);
+            if !(s == 3 && b % 2 == 1) {
+                let k = if b >= 4 { pat[7 - s] } else { pat[s] };
+                voice(pcm, at, n, tones[c * 3 + k] + (if b >= 6 { 12 } else { 0 }), if b >= 4 { 1 } else { 0 }, 0.16);
+            }
+            if s % 4 == 0 { drum(r, pcm, at, step / 2, true, 0.6); }
+            if s % 4 == 2 { drum(r, pcm, at, step / 3, false, 0.3); }
+            drum(r, pcm, at, step / 8, false, 0.07);
+        }
+    }
+    for i in pcm.len { pcm[i] = max(-1.0, min(1.0, pcm[i] * 0.5)); }
+    return audio::create_sound(pcm);
+}
+
 fn pan(x: i64) -> f32 { ((x as f32) / ((W * TILE) as f32) - 0.5) * 1.6 }
 
 // Plays what changed between two snapshots, so a client hears what the host's game did.
@@ -558,6 +609,8 @@ fn main() {
     guard gfx::open("Bomberman", 960, 720, gfx::WINDOW_RESIZABLE) else { abort(str("gfx: ", gfx::error())); }
     audio::open();
     let sfx = make_sfx(r);
+    let tune = audio::play(make_music(r), 0.2, 0.0, 1.0, true);
+    var muted = false;
     let hud = overlay(20.0);
     let big = overlay(72.0);
     let z = float2 { 0.0, 0.0 };
@@ -570,6 +623,7 @@ fn main() {
     var frame = 0;
     while gfx::frame() {
         if gfx::key_pressed("Escape") || frame == frames { break; }
+        if gfx::key_pressed("M") { muted = !muted; audio::set_voice(tune, if muted { 0.0 } else { 0.2 }, 0.0, 1.0); }
         ui::input_from_gfx(hud);
         ui::input_from_gfx(big);
         if frames >= 0 { sleep(0.016); }
