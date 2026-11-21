@@ -28,3 +28,10 @@ Your own music: put a 16-bit WAV named `music.wav` in the folder you launch the 
 chiptune (M still mutes). Convert a track you own on a Mac with
 `afconvert -f WAVE -d LEI16 song.mp3 music.wav`, or anywhere with `ffmpeg -i song.mp3 -c:a pcm_s16le music.wav`.
 Each player uses their own file. `music.wav` is git-ignored, so it never lands in the repo.
+
+UDP mode (to try against the default TCP): `bomberman join HOST udp`. The client opens a UDP socket (`udp.c`: POSIX
+sockets, Winsock on Windows) and sends its keys to the host's UDP port 8080 every frame; the host answers with a
+datagram snapshot every tick. The WebSocket stays up for joining, leaving and a 2 Hz heartbeat, and carries everything
+if UDP stops (about half a second without datagrams). Allow UDP port 8080 through the host's firewall. Window label
+shows `CLIENT P2 UDP`; on exit each side prints how many datagrams it saw. There is no authentication: any packet
+naming a slot drives it, which is fine for a LAN.

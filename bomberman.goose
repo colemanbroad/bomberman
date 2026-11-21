@@ -37,7 +37,14 @@ struct Player { x: i64, y: i64, on: u8, alive: u8, bombs: u8, range: u8, speed: 
 struct Bomb { x: u8, y: u8, t: u8, range: u8, owner: u8, dir: u8, m: u8 }
 // A sheep wanders at random and blocks the way like a movable block. dir: 0 up, 1 down, 2 left, 3 right, 4 grazing.
 struct Sheep { x: i64, y: i64, alive: u8, dir: u8, t: u8 }
-struct State { grid: u8[195], players: Player[4], bombs: Bomb[..16], sheep: Sheep[2], drops: u8, over: i64, you: u8, ack: i64 }   // drops: percent of brick fires that leave a power-up
+struct State { grid: u8[195], players: Player[4], bombs: Bomb[..16], sheep: Sheep[2], drops: u8, over: i64, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
+
+// UDP (udp.c): inputs and snapshots fly as datagrams when a client joins with `udp`; the WebSocket stays up for
+// joining, leaving and a slow heartbeat. Each snapshot carries its tick, so stale or reordered ones are dropped.
+extern fn udp_open(port: i64) -> i64;
+extern fn udp_peer(host: const u8[:], port: i64) -> i64;
+extern fn udp_send(fd: i64, b: const u8[:], peer: i64) -> i64;
+extern fn udp_recv(fd: i64, b: u8[:], from: i64&) -> i64;
 
 // Host: input from a connection (reply names it). Client: the key bits to send.
 // seq numbers a client's input steps; the host echoes the latest one it has seen in State.ack.
@@ -815,7 +822,7 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
         format(drp, "Power-ups ", s.drops, "%");
         text(hud, size.x - 444.0, 4.0, drp, ui::rgb(200, 205, 220));
         var tag: u8[>..] = [];
-        if mode == "solo" { tag.append("SOLO"); } else if mode == "host" { tag.append("HOST"); } else { format(tag, "CLIENT P", s.you + 1); }
+        if mode == "solo" { tag.append("SOLO"); } else if mode == "host" { tag.append("HOST"); } else { format(tag, "CLIENT P", s.you + 1); if mode == "udp" { tag.append(" UDP"); } }
         if fx.lost { tag.append("  DISCONNECTED"); }
         text(hud, size.x - 24.0 - ui::text_width(ui::font(hud), tag), 4.0, tag, ui::rgb(150, 156, 176));
     }
@@ -914,6 +921,19 @@ fn main() {
     var prev = State { .. };
     var r = rng { random_seed() };
     var ack: i64[4] = [0, 0, 0, 0];
+    let usock = if mode == "host" { udp_open(8080) } else { -1 };
+    var upeer: i64[4] = [-1, -1, -1, -1];      // host: where each client's datagrams come from
+    var uage: i64[4] = [999, 999, 999, 999];   // host: ticks since a client's last datagram
+    var rbuf: u8[>..] = [];
+    rbuf.resize(2048, 0);
+    let want_udp = mode == "join" && argv.len > 3 && argv[3] == "udp";
+    let csock = if want_udp { udp_open(0) } else { -1 };
+    let hostpeer = if want_udp { udp_peer(argv[2], 8080) } else { -1 };
+    guard !want_udp || (csock >= 0 && hostpeer >= 0) else { abort("udp: cannot open a socket or resolve the host"); }
+    var joined = false;  // client: got the first snapshot, so we know our slot
+    var lasttick = 0;
+    var n_udp = 0;       // datagrams received (host: inputs, client: snapshots)
+    var n_applied = 0;       // snapshots applied (from either channel)
     let none = http::MailAddress { .. };
     var addr: http::MailAddress[4] = [none, none, none, none];
     s.players[0].on = 1;
@@ -971,9 +991,20 @@ fn main() {
         let bits = if frames >= 0 { bot(frame, if mode == "join" { 3 } else { 0 }) } else { keys() };
         acc += if frames >= 0 { 1.0 / 60.0 } else { min(gfx::delta_time(), 0.1) };
         if mode == "join" {
+            loop {          // datagram snapshots join the WebSocket's in one stream
+                var from = 0;
+                let got = udp_recv(csock, rbuf[..], from);
+                if got < 0 { break; }
+                var f = State { .. };
+                if http::mail_value(rbuf[0..got], f) { qput(f); n_udp += 1; }
+            }
             loop {
                 let f, got = qpoll<State>();
                 guard got else { break; }
+                if f.tick <= lasttick { continue; }
+                lasttick = f.tick;
+                n_applied += 1;
+                joined = true;
                 s = f;
                 // The snapshot is a round trip old: replay the inputs the host has not seen, then ease toward that.
                 var c = s;
@@ -1005,6 +1036,15 @@ fn main() {
                 py = c.players[s.you].y;
             }
             qput(Pad { bits, seq });
+            if want_udp && joined {
+                var d: u8[>..] = [];
+                d.push(66);
+                d.push(s.you);
+                d.push(bits);
+                d.push((seq & 255) as u8);
+                d.push((seq >> 8) as u8);
+                udp_send(csock, d[..], hostpeer);
+            }
         } else {
             s.players[0].bits = bits;
             loop {
@@ -1012,24 +1052,49 @@ fn main() {
                 guard ok else { break; }
                 var who = -1;
                 for i in 1..4 { if s.players[i].on != 0 && addr[i].key == m.reply.key { who = i; } }
+                if who >= 0 && uage[who] < 30 && !m.leave { continue; }   // UDP is carrying this player's input
                 if who < 0 && !m.leave {
                     for i in 1..4 { if who < 0 && s.players[i].on == 0 { who = i; } }
-                    if who >= 0 { addr[who] = m.reply; s.players[who].on = 1; reset_round(s, r); }
+                    if who >= 0 { addr[who] = m.reply; s.players[who].on = 1; upeer[who] = -1; uage[who] = 999; reset_round(s, r); }
                 }
                 if who < 0 { continue; }
-                if m.leave { s.players[who].on = 0; s.players[who].alive = 0; }
+                if m.leave { s.players[who].on = 0; s.players[who].alive = 0; upeer[who] = -1; uage[who] = 999; }
                 else { s.players[who].bits = m.bits; ack[who] = m.seq; }
+            }
+            loop {          // datagrams: 'B', slot, bits, seq lo, seq hi
+                var from = 0;
+                let got = udp_recv(usock, rbuf[..], from);
+                if got < 0 { break; }
+                guard got >= 5 && rbuf[0] == 66 else { continue; }
+                let who = rbuf[1] as i64;
+                guard who >= 1 && who < 4 && s.players[who].on != 0 else { continue; }
+                let sq = (rbuf[3] as i64) | ((rbuf[4] as i64) << 8);
+                n_udp += 1;
+                upeer[who] = from;
+                uage[who] = 0;
+                if ((sq - ack[who]) & 65535) < 32768 { s.players[who].bits = rbuf[2]; ack[who] = sq; }
             }
             while acc >= 1.0 / 60.0 {
                 acc -= 1.0 / 60.0;
                 tick(s, r, n);
                 n += 1;
+                s.tick = n;
                 for i in 1..4 {
                     guard s.players[i].on != 0 else { continue; }
                     var c = s;
                     c.you = i as u8;
                     c.ack = ack[i];
-                    if http::mail_send_value(addr[i], 0, c) == http::STALE { s.players[i].on = 0; s.players[i].alive = 0; }
+                    uage[i] += 1;
+                    let viaudp = uage[i] < 30 && upeer[i] >= 0;
+                    if viaudp {
+                        var one = [c];
+                        var image: u8[>..] = [];
+                        one.to_bytes(image);
+                        udp_send(usock, image[..], upeer[i]);
+                    }
+                    if !viaudp || n % 30 == 0 {          // TCP carries every snapshot, or just a heartbeat while UDP flows
+                        if http::mail_send_value(addr[i], 0, c) == http::STALE { s.players[i].on = 0; s.players[i].alive = 0; }
+                    }
                 }
             }
             hear(prev, s, sfx, fx);
@@ -1050,7 +1115,7 @@ fn main() {
             if s.players[i].ghost > 0 && moved && fx.dust.len < 64 { fx.dust.push(float4 { shown[i].x, shown[i].y, 0.0, 0.0 }); }
             fx.last[i] = shown[i];
         }
-        draw(hud, big, s, shown, fx, mode);
+        draw(hud, big, s, shown, fx, if want_udp { "udp" } else { mode });
         if mode != "join" {          // the host sets how often bricks leave power-ups
             let sz = gfx::screen_size();
             if ui::begin(panel, "R", ui::rect(sz.x as f32 - 324.0, 5.0, 170.0, 26.0), ui::WINDOW_NO_SCROLLBAR) {
@@ -1067,6 +1132,7 @@ fn main() {
         frame += 1;
     }
     for i in 4 { if s.players[i].on != 0 { print("player ", i, " at ", s.players[i].x / TILE, ",", s.players[i].y / TILE, " alive ", s.players[i].alive, " wins ", s.players[i].wins); } }
+    if mode != "solo" { print("datagrams ", n_udp, ", snapshots applied ", n_applied); }
     ui::destroy(hud);
     ui::destroy(big);
     ui::destroy(panel);
