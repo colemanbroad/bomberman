@@ -151,7 +151,7 @@ chmod +x bomberman-portable
         <h3>Everyone else</h3>
         <p>Join by the host's address. The label at the top right of the window should read <b>CLIENT</b>, not SOLO.</p>
         <pre><code>./bomberman-portable join 192.168.4.46</code><button class="copy" type="button">Copy</button></pre>
-        <p class="note">Replace the numbers with the host's address. Add <code>udp</code> at the end to try the UDP connection, and ask the host to allow UDP port 8080.</p>
+        <p class="note">Replace the numbers with the host's address. Low-latency UDP is used automatically (with automatic WebSocket fallback if UDP port 8080 is blocked; add <code>tcp</code> to force TCP).</p>
       </div>
     </div>
   </section>
