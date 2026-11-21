@@ -482,8 +482,8 @@ fn make_dark(r: rng&) -> audio::Sound {
         if b % 2 == 0 { for k in 3 { swell(pcm, b * 8 * step, 16 * step, chord[c * 3 + k], 0.2); } }
         for s in 8 {
             let at = (b * 8 + s) * step;
-            if s == 0 || (s == 5 && b % 2 == 1) || (s == 6 && b % 4 == 3) { sub(pcm, at, step * 3, roots[c], 0.9); }
-            if s == 0 || s == 3 || s == 6 { voice(pcm, at, step * 2, stab[c * 3 + line[(b + s) % 8]], 1, 0.2); }
+            if s == 0 || (s == 5 && b % 2 == 1) || (s == 6 && b % 4 == 3) { sub(pcm, at, min(step * 3, 64 * step - at), roots[c], 0.9); }
+            if s == 0 || s == 3 || s == 6 { voice(pcm, at, min(step * 2, 64 * step - at), stab[c * 3 + line[(b + s) % 8]], 1, 0.2); }
             if b >= 4 && s % 2 == 1 { voice(pcm, at, step, stab[c * 3 + line[s]] + 12, 0, 0.07); }
             if s == 0 || s == 5 || (s == 7 && b % 2 == 1) { drum(r, pcm, at, step * 2 / 3, true, 0.8); }
             if s == 4 { drum(r, pcm, at, step / 2, false, 0.45); }
