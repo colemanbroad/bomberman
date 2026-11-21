@@ -45,13 +45,25 @@ fn default_kind(slot: i64) -> u8 {
     return CHAR_PIG;
 }
 
+let MAP_ISLAND: u8 = 0;
+let MAP_FOREST: u8 = 1;
+let MAP_MOUNTAINS: u8 = 2;
+let MAP_DESERT: u8 = 3;
+
+fn map_name(m: u8) -> const u8[:] {
+    if m == MAP_ISLAND { return "Island"; }
+    if m == MAP_FOREST { return "Forest"; }
+    if m == MAP_MOUNTAINS { return "Mountains"; }
+    return "Desert";
+}
+
 let ROBOTO: const u8[:] = embed_file("Roboto-Regular.ttf");
 struct Player { x: i64, y: i64, on: u8, alive: u8, bombs: u8, range: u8, speed: u8, wins: u8, streak: u8, bits: u8, held: u8, placed: u8, ghost: u16, kick: u8, kind: u8, name: u8[..12] }
 // dir: 0 still, 1 up, 2 down, 3 left, 4 right (a kicked bomb slides); m: ticks since its last step.
 struct Bomb { x: u8, y: u8, t: u8, range: u8, owner: u8, dir: u8, m: u8 }
 // A sheep wanders at random and blocks the way like a movable block. dir: 0 up, 1 down, 2 left, 3 right, 4 grazing.
 struct Sheep { x: i64, y: i64, alive: u8, dir: u8, t: u8 }
-struct State { grid: u8[195], players: Player[4], bombs: Bomb[..16], sheep: Sheep[2], drops: u8, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
+struct State { grid: u8[195], players: Player[4], bombs: Bomb[..16], sheep: Sheep[2], drops: u8, map: u8, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
 
 // UDP (udp.c): inputs and snapshots fly as datagrams when a client joins with `udp`; the WebSocket stays up for
 // joining, leaving and a slow heartbeat. Each snapshot carries its tick, so stale or reordered ones are dropped.
@@ -130,8 +142,15 @@ fn reset_round(s: State&, r: rng&) {
             var g: u8 = 0;
             let cx = min(tx, W - 1 - tx);
             let cy = min(ty, H - 1 - ty);
-            if cx == 0 || cy == 0 || (tx % 2 == 0 && ty % 2 == 0) { g = 1; }
-            else if cx + cy > 3 && r.rand_int(10) < 7 {
+            let is_border = cx == 0 || cy == 0;
+            var is_pillar = tx % 2 == 0 && ty % 2 == 0;
+            // Subtle symmetric map layout flavor per biome
+            if s.map == MAP_ISLAND && tx >= 6 && tx <= 8 && ty >= 5 && ty <= 7 { is_pillar = false; }
+            else if s.map == MAP_DESERT && (tx == 4 || tx == 10) && (ty == 4 || ty == 8) { is_pillar = false; }
+            else if s.map == MAP_MOUNTAINS && (tx == 4 || tx == 10) && ty == 6 { is_pillar = true; }
+            let density = if s.map == MAP_FOREST { 8 } else if s.map == MAP_DESERT { 6 } else { 7 };
+            if is_border || is_pillar { g = 1; }
+            else if cx + cy > 3 && r.rand_int(10) < density {
                 let k = r.rand_int(100);
                 g = if k < 8 { 6 } else if k < 15 { 7 } else { 2 };
             }
@@ -580,6 +599,135 @@ fn make_dark(r: rng&) -> audio::Sound {
     return audio::create_sound(pcm);
 }
 
+// Bright metallic steel-drum / marimba pluck (fundamental + 2nd harmonic with fast decay) for Tropical Island.
+fn pluck(pcm: f32[>..]&, at: i64, n: i64, m: i64, bright: f64, dec: f64, vol: f64) {
+    let f = 440.0 * exp(((m - 69) as f64) / 12.0 * 0.6931471805599453);
+    for i in n {
+        let u = (i as f64) / (n as f64);
+        let t = (i as f64) / 48000.0;
+        let w = sin(TAU * f * t) + bright * sin(TAU * 2.0 * f * t) * exp(-4.0 * u) + 0.18 * bright * sin(TAU * 3.0 * f * t) * exp(-7.0 * u);
+        pcm[at + i] += (w * vol * exp(-dec * u) * min(1.0, (i as f64) / 60.0)) as f32;
+    }
+}
+
+// Airy vibrato flute for Forest.
+fn flute(pcm: f32[>..]&, at: i64, n: i64, m: i64, vol: f64) {
+    let f = 440.0 * exp(((m - 69) as f64) / 12.0 * 0.6931471805599453);
+    var ph = 0.0;
+    for i in n {
+        let u = (i as f64) / (n as f64);
+        let t = (i as f64) / 48000.0;
+        ph += TAU * f * (1.0 + 0.006 * sin(TAU * 5.5 * t)) / 48000.0;
+        let env = sin(3.141592653589793 * min(1.0, u * 4.0) * 0.5) * exp(-1.8 * u);
+        pcm[at + i] += ((sin(ph) + 0.2 * sin(2.0 * ph)) * vol * env) as f32;
+    }
+}
+
+// Tropical Island: sunny C-major calypso with steel-drum melody, island bass, and syncopated shakers.
+fn make_music_island(r: rng&) -> audio::Sound {
+    let step = 8800;
+    var pcm: f32[>..] = [];
+    pcm.resize(64 * step, 0.0);
+    let roots: i64[4] = [48, 45, 41, 43]; // C Am F G
+    let chord: i64[12] = [72, 76, 79, 69, 72, 76, 65, 69, 72, 67, 71, 74];
+    let mel: i64[16] = [2, 1, 2, 0, 2, 1, 0, 1, 2, 2, 1, 0, 1, 2, 1, 0];
+    for b in 8 {
+        let c = (b / 2) % 4;
+        for s in 8 {
+            let at = (b * 8 + s) * step;
+            let n = min(step * 9 / 10, 64 * step - at);
+            if s == 0 || s == 3 || s == 6 { pluck(pcm, at, min(step * 2, 64 * step - at), roots[c], 0.25, 3.0, 0.48); }
+            if s == 0 || s == 2 || s == 3 || s == 5 || s == 6 {
+                let note = chord[c * 3 + mel[(b % 2) * 8 + s]] + (if b >= 4 && s % 3 == 0 { 12 } else { 0 });
+                pluck(pcm, at, min(step * 3 / 2, 64 * step - at), note, 0.65, 4.5, 0.26);
+            }
+            if s % 4 == 0 { drum(r, pcm, at, step / 2, true, 0.45); }
+            if s == 3 || s == 6 { drum(r, pcm, at, step / 5, false, 0.16); }
+            drum(r, pcm, at, step / 9, false, 0.08);
+        }
+    }
+    for i in pcm.len { pcm[i] = max(-1.0, min(1.0, pcm[i] * 0.55)); }
+    return audio::create_sound(pcm);
+}
+
+// Forest: warm pastoral G-major / E-minor woodland flute over plucked lute arpeggios.
+fn make_music_forest(r: rng&) -> audio::Sound {
+    let step = 10400;
+    var pcm: f32[>..] = [];
+    pcm.resize(64 * step, 0.0);
+    let roots: i64[4] = [43, 50, 40, 48]; // G D Em C
+    let arp: i64[12] = [67, 71, 74, 62, 66, 69, 64, 67, 71, 60, 64, 67];
+    let lead: i64[16] = [79, 81, 83, 79, 78, 76, 74, 78, 76, 79, 83, 81, 79, 76, 74, 72];
+    for b in 8 {
+        let c = (b / 2) % 4;
+        for s in 8 {
+            let at = (b * 8 + s) * step;
+            let n = min(step * 9 / 10, 64 * step - at);
+            if s == 0 || s == 4 { pluck(pcm, at, min(step * 3, 64 * step - at), roots[c], 0.15, 2.5, 0.42); }
+            pluck(pcm, at, n, arp[c * 3 + (s % 3)], 0.3, 4.0, 0.2);
+            if s % 2 == 0 { flute(pcm, at, min(step * 2, 64 * step - at), lead[(b % 4) * 4 + s / 2], 0.24); }
+            if s == 0 { drum(r, pcm, at, step / 3, true, 0.3); }
+            if s == 4 { drum(r, pcm, at, step / 6, false, 0.14); }
+        }
+    }
+    for i in pcm.len { pcm[i] = max(-1.0, min(1.0, pcm[i] * 0.55)); }
+    return audio::create_sound(pcm);
+}
+
+// Mountains: driving heroic alpine anthem (Am G F E) with soaring horns and marching drums.
+fn make_music_mountains(r: rng&) -> audio::Sound {
+    let step = 9200;
+    var pcm: f32[>..] = [];
+    pcm.resize(64 * step, 0.0);
+    let roots: i64[4] = [45, 43, 41, 40]; // Am G F E
+    let chord: i64[12] = [69, 72, 76, 67, 71, 74, 65, 69, 72, 64, 68, 71];
+    let horn: i64[8] = [0, 2, 1, 2, 2, 1, 0, 1];
+    for b in 8 {
+        let c = (b / 2) % 4;
+        if b % 2 == 0 {
+            swell(pcm, b * 8 * step, min(16 * step, 64 * step - b * 8 * step), chord[c * 3], 0.22);
+            swell(pcm, b * 8 * step, min(16 * step, 64 * step - b * 8 * step), chord[c * 3 + 2], 0.18);
+        }
+        for s in 8 {
+            let at = (b * 8 + s) * step;
+            let n = min(step * 9 / 10, 64 * step - at);
+            voice(pcm, at, n, roots[c] + (if s % 2 == 1 { 12 } else { 0 }), 2, 0.42);
+            if s == 0 || s == 2 || s == 3 || s == 6 {
+                voice(pcm, at, min(step * 2, 64 * step - at), chord[c * 3 + horn[(b + s) % 8]] + (if b >= 4 { 12 } else { 0 }), 1, 0.17);
+            }
+            if s == 0 || s == 3 || s == 4 { drum(r, pcm, at, step / 2, true, 0.65); }
+            if s == 2 || s == 6 { drum(r, pcm, at, step / 3, false, 0.35); }
+        }
+    }
+    for i in pcm.len { pcm[i] = max(-1.0, min(1.0, pcm[i] * 0.5)); }
+    return audio::create_sound(pcm);
+}
+
+// Desert: hypnotic D Phrygian dominant (Hijaz) oud plucks, drone bass, and darbuka rhythm.
+fn make_music_desert(r: rng&) -> audio::Sound {
+    let step = 9000;
+    var pcm: f32[>..] = [];
+    pcm.resize(64 * step, 0.0);
+    let scale: i64[8] = [62, 63, 66, 67, 69, 70, 72, 74]; // D Eb F# G A Bb C D
+    let pat: i64[16] = [0, 2, 3, 4, 5, 4, 3, 2, 0, 1, 2, 4, 3, 2, 1, 0];
+    let drone: i64[4] = [38, 38, 39, 38]; // D D Eb D
+    for b in 8 {
+        let c = (b / 2) % 4;
+        for s in 8 {
+            let at = (b * 8 + s) * step;
+            let n = min(step * 9 / 10, 64 * step - at);
+            if s == 0 || s == 4 { sub(pcm, at, min(step * 4, 64 * step - at), drone[c], 0.55); }
+            let idx = pat[(b % 2) * 8 + s];
+            let oct = if b >= 4 && s % 2 == 0 { 12 } else { 0 };
+            pluck(pcm, at, min(step * 3 / 2, 64 * step - at), scale[idx] + oct, 0.9, 5.5, 0.28);
+            if s == 0 || s == 3 || s == 6 { drum(r, pcm, at, step / 2, true, 0.55); }
+            if s == 2 || s == 5 || s == 7 { drum(r, pcm, at, step / 5, false, 0.26); }
+        }
+    }
+    for i in pcm.len { pcm[i] = max(-1.0, min(1.0, pcm[i] * 0.55)); }
+    return audio::create_sound(pcm);
+}
+
 fn pan(x: i64) -> f32 { ((x as f32) / ((W * TILE) as f32) - 0.5) * 1.6 }
 
 // Plays what changed between two snapshots, so a client hears what the host's game did.
@@ -642,28 +790,121 @@ fn text(c: ui::Context, x: f32, y: f32, str: const u8[:], color: ui::Color) {
     ui::draw_text(c, ui::rect(x, y, 600.0, 80.0), str, ui::font(c), ui::Color { 0, 0, 0, 0 }, color);
 }
 
-fn draw_wall(c: ui::Context, x: f32, y: f32, t: f32) {
-    ui::fill_rect(c, ui::rect(x, y, t, t), 3.0, ui::rgb(92, 100, 120));
-    ui::fill_rect(c, ui::rect(x, y, t, t * 0.14), 3.0, ui::rgb(140, 150, 172));
-    ui::fill_rect(c, ui::rect(x, y + t * 0.86, t, t * 0.14), 3.0, ui::rgb(58, 64, 82));
-    ui::stroke_rect(c, ui::rect(x + t * 0.15, y + t * 0.2, t * 0.7, t * 0.6), 2.0, 1.5, ui::rgb(70, 77, 96));
-    for k in 4 {
-        ui::fill_circle(c, ui::rect(x + t * (0.08 + (k % 2) * 0.8), y + t * (0.1 + (k / 2) * 0.76), t * 0.1, t * 0.1), ui::rgb(160, 168, 188));
+fn map_clear_color(m: u8) -> float4 {
+    if m == MAP_ISLAND { return float4 { 0.05, 0.34, 0.45, 1.0 }; }
+    if m == MAP_FOREST { return float4 { 0.07, 0.16, 0.09, 1.0 }; }
+    if m == MAP_MOUNTAINS { return float4 { 0.10, 0.14, 0.22, 1.0 }; }
+    return float4 { 0.32, 0.17, 0.08, 1.0 };
+}
+
+fn map_border_color(m: u8) -> ui::Color {
+    if m == MAP_ISLAND { return ui::rgb(26, 152, 180); }
+    if m == MAP_FOREST { return ui::rgb(30, 62, 34); }
+    if m == MAP_MOUNTAINS { return ui::rgb(46, 56, 78); }
+    return ui::rgb(138, 84, 42);
+}
+
+fn draw_floor(c: ui::Context, m: u8, tx: i64, ty: i64, x: f32, y: f32, t: f32) {
+    let odd = (tx + ty) % 2 == 0;
+    if m == MAP_ISLAND {
+        let base = if odd { ui::rgb(230, 206, 150) } else { ui::rgb(220, 196, 140) };
+        ui::fill_rect(c, ui::rect(x, y, t, t), 0.0, base);
+        if (tx * 7 + ty * 13) % 11 == 0 {
+            ui::fill_circle(c, ui::rect(x + t * 0.35, y + t * 0.55, t * 0.12, t * 0.08), ui::rgb(248, 236, 208));
+        }
+    } else if m == MAP_FOREST {
+        let base = if odd { ui::rgb(78, 134, 64) } else { ui::rgb(70, 124, 58) };
+        ui::fill_rect(c, ui::rect(x, y, t, t), 0.0, base);
+        if (tx * 5 + ty * 11) % 9 == 0 {
+            ui::fill_circle(c, ui::rect(x + t * 0.25, y + t * 0.3, t * 0.1, t * 0.1), ui::rgb(245, 225, 110));
+        }
+    } else if m == MAP_MOUNTAINS {
+        let base = if odd { ui::rgb(134, 148, 170) } else { ui::rgb(144, 158, 180) };
+        ui::fill_rect(c, ui::rect(x, y, t, t), 0.0, base);
+        if (tx * 3 + ty * 17) % 10 == 0 {
+            ui::fill_rect(c, ui::rect(x + t * 0.2, y + t * 0.6, t * 0.28, t * 0.08), 2.0, ui::rgba(235, 244, 255, 140));
+        }
+    } else {
+        let base = if odd { ui::rgb(222, 170, 102) } else { ui::rgb(212, 160, 92) };
+        ui::fill_rect(c, ui::rect(x, y, t, t), 0.0, base);
+        if (tx + ty * 3) % 7 == 0 {
+            ui::stroke_line(c, x + t * 0.15, y + t * 0.5, x + t * 0.75, y + t * 0.45, 1.5, ui::rgba(178, 122, 62, 120));
+        }
     }
 }
 
-fn draw_brick(c: ui::Context, x: f32, y: f32, t: f32) {
-    let mortar = ui::rgb(112, 58, 38);
-    ui::fill_rect(c, ui::rect(x, y, t, t), 4.0, ui::rgb(186, 104, 64));
-    ui::fill_rect(c, ui::rect(x, y, t, t * 0.1), 4.0, ui::rgb(214, 134, 90));
-    for r in 3 {
-        let yy = y + t * (r as f32) / 3.0;
-        if r > 0 { ui::stroke_line(c, x, yy, x + t, yy, 2.0, mortar); }
-        let off = if r % 2 == 0 { 0.5 } else { 0.25 };
-        ui::stroke_line(c, x + t * off, yy, x + t * off, yy + t / 3.0, 2.0, mortar);
-        if r % 2 == 1 { ui::stroke_line(c, x + t * 0.75, yy, x + t * 0.75, yy + t / 3.0, 2.0, mortar); }
+fn draw_wall(c: ui::Context, m: u8, x: f32, y: f32, t: f32) {
+    if m == MAP_ISLAND {
+        // Tropical volcanic rock + lush palm fronds
+        ui::fill_rect(c, ui::rect(x, y, t, t), 5.0, ui::rgb(104, 96, 86));
+        ui::fill_rect(c, ui::rect(x + t * 0.08, y + t * 0.08, t * 0.84, t * 0.2), 3.0, ui::rgb(142, 134, 120));
+        ui::fill_circle(c, ui::rect(x + t * 0.22, y + t * 0.16, t * 0.56, t * 0.52), ui::rgb(42, 148, 68));
+        ui::fill_triangle(c, x + t * 0.5, y + t * 0.42, x + t * 0.06, y + t * 0.2, x + t * 0.26, y + t * 0.54, ui::rgb(58, 174, 82));
+        ui::fill_triangle(c, x + t * 0.5, y + t * 0.42, x + t * 0.94, y + t * 0.2, x + t * 0.74, y + t * 0.54, ui::rgb(58, 174, 82));
+        ui::fill_circle(c, ui::rect(x + t * 0.42, y + t * 0.42, t * 0.16, t * 0.16), ui::rgb(120, 74, 38));
+    } else if m == MAP_FOREST {
+        // Tall layered pine tree on mossy soil
+        ui::fill_rect(c, ui::rect(x, y, t, t), 4.0, ui::rgb(42, 74, 38));
+        ui::fill_rect(c, ui::rect(x + t * 0.4, y + t * 0.62, t * 0.2, t * 0.3), 2.0, ui::rgb(96, 62, 36));
+        ui::fill_triangle(c, x + t * 0.5, y + t * 0.08, x + t * 0.9, y + t * 0.72, x + t * 0.1, y + t * 0.72, ui::rgb(28, 92, 46));
+        ui::fill_triangle(c, x + t * 0.5, y + t * 0.06, x + t * 0.8, y + t * 0.5, x + t * 0.2, y + t * 0.5, ui::rgb(44, 124, 62));
+    } else if m == MAP_MOUNTAINS {
+        // Jagged snow-capped alpine peak
+        ui::fill_rect(c, ui::rect(x, y, t, t), 4.0, ui::rgb(68, 78, 98));
+        ui::fill_triangle(c, x + t * 0.5, y + t * 0.08, x + t * 0.94, y + t * 0.92, x + t * 0.06, y + t * 0.92, ui::rgb(96, 108, 130));
+        ui::fill_triangle(c, x + t * 0.5, y + t * 0.08, x + t * 0.7, y + t * 0.46, x + t * 0.3, y + t * 0.46, ui::rgb(242, 248, 255));
+        ui::stroke_rect(c, ui::rect(x + 1.0, y + 1.0, t - 2.0, t - 2.0), 4.0, 1.5, ui::rgb(52, 60, 76));
+    } else {
+        // Carved desert sandstone pillar
+        ui::fill_rect(c, ui::rect(x, y, t, t), 3.0, ui::rgb(176, 126, 72));
+        ui::fill_rect(c, ui::rect(x, y, t, t * 0.16), 3.0, ui::rgb(218, 172, 110));
+        ui::fill_rect(c, ui::rect(x, y + t * 0.84, t, t * 0.16), 3.0, ui::rgb(126, 82, 42));
+        ui::stroke_rect(c, ui::rect(x + t * 0.18, y + t * 0.22, t * 0.64, t * 0.56), 2.0, 2.0, ui::rgb(132, 86, 44));
+        ui::fill_triangle(c, x + t * 0.5, y + t * 0.3, x + t * 0.7, y + t * 0.68, x + t * 0.3, y + t * 0.68, ui::rgb(198, 148, 88));
     }
-    ui::stroke_rect(c, ui::rect(x, y, t, t), 4.0, 2.0, ui::rgb(90, 46, 30));
+}
+
+fn draw_brick(c: ui::Context, m: u8, x: f32, y: f32, t: f32) {
+    if m == MAP_ISLAND {
+        // Bamboo / driftwood crate
+        ui::fill_rect(c, ui::rect(x, y, t, t), 5.0, ui::rgb(184, 146, 76));
+        for k in 4 {
+            let xx = x + t * (0.12 + 0.24 * k);
+            ui::fill_rect(c, ui::rect(xx, y + t * 0.08, t * 0.16, t * 0.84), 3.0, ui::rgb(208, 174, 96));
+        }
+        ui::fill_rect(c, ui::rect(x + t * 0.06, y + t * 0.32, t * 0.88, t * 0.1), 2.0, ui::rgb(126, 92, 46));
+        ui::fill_rect(c, ui::rect(x + t * 0.06, y + t * 0.62, t * 0.88, t * 0.1), 2.0, ui::rgb(126, 92, 46));
+        ui::stroke_rect(c, ui::rect(x, y, t, t), 5.0, 2.0, ui::rgb(106, 78, 36));
+    } else if m == MAP_FOREST {
+        // Stacked wooden timber logs
+        ui::fill_rect(c, ui::rect(x, y, t, t), 5.0, ui::rgb(114, 72, 42));
+        for r in 3 {
+            let yy = y + t * (0.06 + 0.31 * r);
+            ui::fill_rect(c, ui::rect(x + t * 0.06, yy, t * 0.88, t * 0.25), t * 0.12, ui::rgb(148, 96, 56));
+            ui::fill_circle(c, ui::rect(x + t * 0.72, yy + t * 0.03, t * 0.18, t * 0.18), ui::rgb(208, 166, 114));
+        }
+        ui::stroke_rect(c, ui::rect(x, y, t, t), 5.0, 2.0, ui::rgb(74, 46, 26));
+    } else if m == MAP_MOUNTAINS {
+        // Frosted boulder / ice block
+        ui::fill_rect(c, ui::rect(x, y, t, t), 6.0, ui::rgb(154, 198, 228));
+        ui::fill_rect(c, ui::rect(x + t * 0.08, y + t * 0.08, t * 0.84, t * 0.22), 4.0, ui::rgb(218, 240, 255));
+        ui::stroke_line(c, x + t * 0.2, y + t * 0.35, x + t * 0.55, y + t * 0.6, 2.0, ui::rgb(96, 140, 174));
+        ui::stroke_line(c, x + t * 0.55, y + t * 0.6, x + t * 0.8, y + t * 0.45, 2.0, ui::rgb(96, 140, 174));
+        ui::stroke_rect(c, ui::rect(x, y, t, t), 6.0, 2.0, ui::rgb(82, 118, 150));
+    } else {
+        // Terracotta adobe bricks
+        let mortar = ui::rgb(122, 62, 34);
+        ui::fill_rect(c, ui::rect(x, y, t, t), 4.0, ui::rgb(196, 108, 62));
+        ui::fill_rect(c, ui::rect(x, y, t, t * 0.1), 4.0, ui::rgb(226, 140, 92));
+        for r in 3 {
+            let yy = y + t * (r as f32) / 3.0;
+            if r > 0 { ui::stroke_line(c, x, yy, x + t, yy, 2.0, mortar); }
+            let off = if r % 2 == 0 { 0.5 } else { 0.25 };
+            ui::stroke_line(c, x + t * off, yy, x + t * off, yy + t / 3.0, 2.0, mortar);
+            if r % 2 == 1 { ui::stroke_line(c, x + t * 0.75, yy, x + t * 0.75, yy + t / 3.0, 2.0, mortar); }
+        }
+        ui::stroke_rect(c, ui::rect(x, y, t, t), 4.0, 2.0, ui::rgb(104, 52, 28));
+    }
 }
 
 fn draw_steel(c: ui::Context, x: f32, y: f32, t: f32) {
@@ -1171,15 +1412,15 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
     let oy = top + fx.shake * cos(tm * 77.0);
     fx.shake *= 0.88;
     if ui::begin(hud, "G", ui::rect(0, 0, size.x, size.y), ui::WINDOW_NO_INPUT | ui::WINDOW_NO_SCROLLBAR) {
-        ui::fill_rect(hud, ui::rect(ox - 8.0, oy - 8.0, t * W + 16.0, t * H + 16.0), 10.0, ui::rgb(28, 32, 44));
+        ui::fill_rect(hud, ui::rect(ox - 8.0, oy - 8.0, t * W + 16.0, t * H + 16.0), 10.0, map_border_color(s.map));
         for ty in H {
             for tx in W {
                 let g = s.grid[ty * W + tx];
                 let x = ox + tx * t;
                 let y = oy + ty * t;
-                ui::fill_rect(hud, ui::rect(x, y, t, t), 0.0, if (tx + ty) % 2 == 0 { ui::rgb(54, 62, 78) } else { ui::rgb(60, 68, 86) });
-                if g == 1 { draw_wall(hud, x, y, t); }
-                else if g == 2 { draw_brick(hud, x, y, t); }
+                draw_floor(hud, s.map, tx, ty, x, y, t);
+                if g == 1 { draw_wall(hud, s.map, x, y, t); }
+                else if g == 2 { draw_brick(hud, s.map, x, y, t); }
                 else if g == 6 { draw_steel(hud, x, y, t); }
                 else if g == 7 { draw_gift(hud, x, y, t, tm); }
                 else if (g >= 3 && g <= 5) || g == 8 || g == 9 { draw_power(hud, g, x, y, t, tm); }
@@ -1329,10 +1570,12 @@ fn main() {
     let mode = if argv.len > 1 { argv[1] } else { "solo" };
     guard mode == "solo" || mode == "host" || (mode == "join" && argv.len > 2) else { abort("usage: bomberman [solo | host | join HOST]"); }
     var frames = -1;
+    var init_map: u8 = MAP_ISLAND;
     var my_name: u8[..12] = [];
     var my_kind: u8 = if mode == "join" { CHAR_GOOSE } else { default_kind(0) };
     for i in argv.len {
         if argv[i] == "--frames" && i + 1 < argv.len { frames = parse_int(argv[i + 1]); }
+        if argv[i] == "--map" && i + 1 < argv.len { init_map = (parse_int(argv[i + 1]) & 3) as u8; }
         if argv[i] == "--name" && i + 1 < argv.len {
             my_name.resize(0);
             let ln = min(12, argv[i + 1].len);
@@ -1363,6 +1606,7 @@ fn main() {
     s.players[0].name = my_name;
     s.players[0].kind = my_kind;
     s.drops = 33;
+    s.map = init_map;
     reset_round(s, r);
     if mode == "host" {
         let cfg = http::Config { port: 8080, workers: 1, mail_slots: 64, mail_size: 4096, max_waiting: 16, .. };
@@ -1384,10 +1628,10 @@ fn main() {
     let own = file_exists("music.wav") && read_file("music.wav", wav) && wav_pcm(wav, pcm, info);
     if own { print("playing music.wav: ", info[0], " Hz, ", info[1], " channels"); }
     let mvol: f32 = if own { 0.5 } else { 0.2 };
-    let song0 = make_music(r);
-    let song1 = make_dark(r);
-    var track = 0;
-    var tune = if own { audio::play(audio::create_sound(pcm, info[0], info[1]), mvol, 0.0, 1.0, true) } else { audio::play(song0, mvol, 0.0, 1.0, true) };
+    let songs: audio::Sound[6] = [make_music_island(r), make_music_forest(r), make_music_mountains(r), make_music_desert(r), make_music(r), make_dark(r)];
+    var track = s.map as i64;
+    var last_map = s.map;
+    var tune = if own { audio::play(audio::create_sound(pcm, info[0], info[1]), mvol, 0.0, 1.0, true) } else { audio::play(songs[track], mvol, 0.0, 1.0, true) };
     var muted = false;
     let hud = overlay(20.0);
     let big = overlay(72.0);
@@ -1410,10 +1654,10 @@ fn main() {
             if menu_open { menu_open = false; } else { break; }
         }
         let typing = menu_open || ui::wants_keyboard(menu);
-        if !typing && gfx::key_pressed("N") && !own {          // switch between the two built-in tracks
-            track = 1 - track;
+        if !typing && gfx::key_pressed("N") && !own {          // cycle through all map themes + classic & dark tracks
+            track = (track + 1) % 6;
             audio::stop(tune);
-            tune = audio::play(if track == 0 { song0 } else { song1 }, if muted { 0.0 } else { mvol }, 0.0, 1.0, true);
+            tune = audio::play(songs[track], if muted { 0.0 } else { mvol }, 0.0, 1.0, true);
         }
         if !typing && gfx::key_pressed("M") { muted = !muted; audio::set_voice(tune, if muted { 0.0 } else { mvol }, 0.0, 1.0); }
         ui::input_from_gfx(hud);
@@ -1549,13 +1793,24 @@ fn main() {
             if s.players[i].ghost > 0 && moved && fx.dust.len < 64 { fx.dust.push(float4 { shown[i].x, shown[i].y, 0.0, 0.0 }); }
             fx.last[i] = shown[i];
         }
+        if s.map != last_map {
+            last_map = s.map;
+            if !own {
+                track = (s.map & 3) as i64;
+                audio::stop(tune);
+                tune = audio::play(songs[track], if muted { 0.0 } else { mvol }, 0.0, 1.0, true);
+            }
+        }
         draw(hud, big, s, shown, fx, if want_udp { "udp" } else { mode });
         let sz = gfx::screen_size();
-        if ui::begin(panel, "Bar", ui::rect(sz.x as f32 - 390.0, 4.0, 260.0, 28.0), ui::WINDOW_NO_SCROLLBAR) {
+        if ui::begin(panel, "Bar", ui::rect(sz.x as f32 - 440.0, 4.0, 310.0, 28.0), ui::WINDOW_NO_SCROLLBAR) {
             if mode != "join" {
-                let rat: f32[2] = [0.35, 0.65];
+                let rat: f32[3] = [0.28, 0.34, 0.38];
                 ui::layout_row(panel, ui::DYNAMIC, 22.0, rat);
                 if ui::button_label(panel, "Profile") { menu_open = !menu_open; }
+                var mlbl: u8[>..] = [];
+                format(mlbl, "Map: ", map_name(s.map));
+                if ui::button_label(panel, mlbl) { s.map = (s.map + 1) % 4; reset_round(s, r); }
                 s.drops = ui::slide_int(panel, 0, s.drops as i64, 100, 1) as u8;
             } else {
                 ui::layout_row_dynamic(panel, 22.0, 1);
@@ -1595,7 +1850,7 @@ fn main() {
             }
             ui::end(menu);
         }
-        gfx::begin_screen(float4 { 0.06, 0.07, 0.1, 1.0 });
+        gfx::begin_screen(map_clear_color(s.map));
         gfx::end_pass();
         ui::render(hud);
         ui::render(big);
