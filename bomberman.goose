@@ -32,10 +32,14 @@ let GHOST = 600;             // ghost power-up length in ticks
 let NAPALM = 480;            // napalm trail length in ticks
 let DRUNK = 900;             // drunk jitter length in ticks
 let BOMB_UNKICK: u8 = 1;
+let BOMB_WARPED: u8 = 2;
+let DEAD_NONE: u8 = 0;
+let DEAD_SHEEP: u8 = 1;      // reincarnated as controllable black sheep (blocks alive players & bombs)
+let DEAD_GHOST: u8 = 2;      // fast specter that passes through blocks and leaves fog behind
 
 // Tile values: 0 empty, 1 wall, 2 brick, 3 range+, 4 bomb+, 5 speed+, 6 steel crate (two hits), 7 gift crate (always drops),
 // 8 ghost, 9 kick, 10 missile, 11 napalm, 12 mines, 13 drunk, 14 bad/curse, 15 unkickable bombs,
-// 16..31 flame, 32..47 flame over brick, 48..63 flame over gift, 64..95 slow-decaying napalm flame.
+// 16..31 flame, 32..47 flame over brick, 48..63 flame over gift, 64..95 slow-decaying napalm flame, 96..127 fog cloud.
 let CHAR_GOOSE: u8 = 0;
 let CHAR_SQUIRREL: u8 = 1;
 let CHAR_BABY: u8 = 2;
@@ -78,6 +82,7 @@ let PWR_ALL: u16 = 2047;
 
 fn is_power(g: u8) -> bool { (g >= 3 && g <= 5) || (g >= 8 && g <= 15) }
 fn is_flame(g: u8) -> bool { g >= 16 && g < 96 }
+fn is_fog(g: u8) -> bool { g >= 96 }
 fn is_solid(g: u8) -> bool { g == 1 || g == 2 || g == 6 || g == 7 }
 
 fn pick_power(mask: u16, r: rng&) -> u8 {
@@ -98,16 +103,16 @@ fn pick_power(mask: u16, r: rng&) -> u8 {
 }
 
 let ROBOTO: const u8[:] = embed_file("Roboto-Regular.ttf");
-struct Player { x: i64, y: i64, on: u8, alive: u8, bombs: u8, range: u8, speed: u8, slow: u8, wins: u8, streak: u8, bits: u8, held: u8, mine_held: u8, placed: u8, ghost: u16, napalm: u16, drunk: u16, kick: u8, unkick: u8, mines: u8, missiles: u8, kind: u8, name: u8[..12] }
-// dir: 0 still, 1 up, 2 down, 3 left, 4 right (a kicked bomb slides); m: ticks since its last step; flags: bit 0 = unkickable.
+struct Player { x: i64, y: i64, on: u8, alive: u8, dead_mode: u8, portal_cd: u8, bombs: u8, range: u8, speed: u8, slow: u8, wins: u8, streak: u8, bits: u8, held: u8, mine_held: u8, placed: u8, ghost: u16, napalm: u16, drunk: u16, kick: u8, unkick: u8, mines: u8, missiles: u8, kind: u8, name: u8[..12] }
+// dir: 0 still, 1 up, 2 down, 3 left, 4 right (a kicked bomb slides); m: ticks since its last step; flags: bit 0 = unkickable, bit 1 = warped.
 struct Bomb { x: u8, y: u8, t: u8, range: u8, owner: u8, dir: u8, m: u8, flags: u8 }
 // Proximity mine: arms down to 0, then explodes when stepped on or blasted.
 struct Mine { x: u8, y: u8, owner: u8, arm: u8 }
 // Player-steered heat-seeker missile: while active, the owner stands still wearing a headset.
-struct Missile { x: i32, y: i32, active: u8, dir: u8, t: u16 }
+struct Missile { x: i32, y: i32, active: u8, dir: u8, portal_cd: u8, t: u16 }
 // A sheep wanders at random and blocks the way like a movable block. dir: 0 up, 1 down, 2 left, 3 right, 4 grazing.
-struct Sheep { x: i64, y: i64, alive: u8, dir: u8, t: u8 }
-struct State { grid: u8[195], players: Player[4], bombs: Bomb[..16], mines: Mine[..8], missiles: Missile[4], sheep: Sheep[2], drops: u8, regrow: u8, map: u8, power_mask: u16, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
+struct Sheep { x: i64, y: i64, alive: u8, dir: u8, t: u8, portal_cd: u8 }
+struct State { grid: u8[195], players: Player[4], bombs: Bomb[..16], mines: Mine[..8], missiles: Missile[4], sheep: Sheep[2], drops: u8, regrow: u8, map: u8, portals_on: u8, portals: u8[4], power_mask: u16, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
 
 // UDP (udp.c): inputs and snapshots fly as datagrams when a client joins with `udp`; the WebSocket stays up for
 // joining, leaving and a slow heartbeat. Each snapshot carries its tick, so stale or reordered ones are dropped.
@@ -141,6 +146,18 @@ fn mine_at(s: State&, tx: i64, ty: i64) -> i64 {
     return -1;
 }
 
+fn is_portal(s: State&, tx: i64, ty: i64) -> bool {
+    if s.portals_on == 0 { return false; }
+    return (tx == s.portals[0] && ty == s.portals[1]) || (tx == s.portals[2] && ty == s.portals[3]);
+}
+
+fn portal_dest(s: State&, tx: i64, ty: i64) -> int2 {
+    if s.portals_on == 0 { return int2 { -1, -1 }; }
+    if tx == s.portals[0] && ty == s.portals[1] { return int2 { s.portals[2] as i32, s.portals[3] as i32 }; }
+    if tx == s.portals[2] && ty == s.portals[3] { return int2 { s.portals[0] as i32, s.portals[1] as i32 }; }
+    return int2 { -1, -1 };
+}
+
 fn hits(ax: i64, ay: i64, bx: i64, by: i64) -> bool { return abs(ax - bx) < 2 * HB && abs(ay - by) < 2 * HB; }
 
 // Does a box centered at x y hit a wall, block, or a bomb that the box (now at ox oy) is not already standing on?
@@ -157,12 +174,15 @@ fn tiles_blocked(s: State&, ox: i64, oy: i64, x: i64, y: i64) -> bool {
     return false;
 }
 
-// Player i, moving to x y, is stopped by tiles, holding players, and sheep (unless already overlapping them).
+// Player i, moving to x y, is stopped by tiles, holding players, wandering sheep, and dead black sheep.
 fn blocked(s: State&, i: i64, x: i64, y: i64) -> bool {
     let p = s.players[i];
     for j in 4 {
         let q = s.players[j];
-        guard j != i && q.on != 0 && q.alive != 0 && (q.bits & HOLD) != 0 else { continue; }
+        guard j != i && q.on != 0 else { continue; }
+        let holds = q.alive != 0 && (q.bits & HOLD) != 0;
+        let bsheep = q.alive == 0 && q.dead_mode == DEAD_SHEEP;
+        guard holds || bsheep else { continue; }
         if hits(x, y, q.x, q.y) && !hits(p.x, p.y, q.x, q.y) { return true; }
     }
     for k in 2 {
@@ -172,11 +192,26 @@ fn blocked(s: State&, i: i64, x: i64, y: i64) -> bool {
     return tiles_blocked(s, p.x, p.y, x, y);
 }
 
+// Blocking check for a player-controlled black sheep: stopped by tiles, bombs, alive players, and other sheep.
+fn dead_sheep_blocked(s: State&, i: i64, x: i64, y: i64) -> bool {
+    let me = s.players[i];
+    for j in 4 {
+        let q = s.players[j];
+        guard j != i && q.on != 0 else { continue; }
+        if (q.alive != 0 || q.dead_mode == DEAD_SHEEP) && hits(x, y, q.x, q.y) && !hits(me.x, me.y, q.x, q.y) { return true; }
+    }
+    for k in 2 {
+        let q = s.sheep[k];
+        if q.alive != 0 && hits(x, y, q.x, q.y) && !hits(me.x, me.y, q.x, q.y) { return true; }
+    }
+    return tiles_blocked(s, me.x, me.y, x, y);
+}
+
 fn sheep_blocked(s: State&, k: i64, x: i64, y: i64) -> bool {
     let me = s.sheep[k];
     for j in 4 {
         let q = s.players[j];
-        if q.on != 0 && q.alive != 0 && hits(x, y, q.x, q.y) && !hits(me.x, me.y, q.x, q.y) { return true; }
+        if q.on != 0 && (q.alive != 0 || q.dead_mode == DEAD_SHEEP) && hits(x, y, q.x, q.y) && !hits(me.x, me.y, q.x, q.y) { return true; }
     }
     for j in 2 {
         let q = s.sheep[j];
@@ -213,6 +248,8 @@ fn reset_round(s: State&, r: rng&) {
         s.players[i].x = (if i % 2 == 0 { 1 } else { W - 2 }) * TILE + TILE / 2;
         s.players[i].y = (if i < 2 { 1 } else { H - 2 }) * TILE + TILE / 2;
         s.players[i].alive = 1;
+        s.players[i].dead_mode = DEAD_NONE;
+        s.players[i].portal_cd = 0;
         s.players[i].bombs = 1;
         s.players[i].range = 2;
         s.players[i].speed = 0;
@@ -231,7 +268,18 @@ fn reset_round(s: State&, r: rng&) {
     for k in 2 {
         let tx = if k == 0 { 5 } else { W - 6 };
         s.grid[(H / 2) * W + tx] = 0;
-        s.sheep[k] = Sheep { tx * TILE + TILE / 2, (H / 2) * TILE + TILE / 2, 1, 4, 0 };
+        s.sheep[k] = Sheep { tx * TILE + TILE / 2, (H / 2) * TILE + TILE / 2, 1, 4, 0, 0 };
+    }
+    // Linked portal pair on symmetric open interior tiles
+    let pset = r.rand_int(3);
+    let ax = if pset == 2 { 5 } else { 3 };
+    let ay = if pset == 1 { H - 4 } else { 3 };
+    let bx = W - 1 - ax;
+    let by = H - 1 - ay;
+    s.portals = [ax as u8, ay as u8, bx as u8, by as u8];
+    if s.portals_on != 0 {
+        s.grid[ay * W + ax] = 0;
+        s.grid[by * W + bx] = 0;
     }
     s.bombs.resize(0);
     s.mines.resize(0);
@@ -292,7 +340,9 @@ fn bomb_stopped(s: State&, nx: i64, ny: i64) -> bool {
     }
     for j in 4 {
         let q = s.players[j];
-        if q.on != 0 && q.alive != 0 && (q.bits & HOLD) != 0 && abs(q.x - cx) < TILE / 2 + HB && abs(q.y - cy) < TILE / 2 + HB { return true; }
+        let holds = q.alive != 0 && (q.bits & HOLD) != 0;
+        let bsheep = q.alive == 0 && q.dead_mode == DEAD_SHEEP;
+        if q.on != 0 && (holds || bsheep) && abs(q.x - cx) < TILE / 2 + HB && abs(q.y - cy) < TILE / 2 + HB { return true; }
     }
     return false;
 }
@@ -302,6 +352,7 @@ fn step_player(s: State&, i: i64) {
     if s.players[i].ghost > 0 { s.players[i].ghost -= 1; }
     if s.players[i].napalm > 0 { s.players[i].napalm -= 1; }
     if s.players[i].drunk > 0 { s.players[i].drunk -= 1; }
+    if s.players[i].portal_cd > 0 { s.players[i].portal_cd -= 1; }
     // While guiding a heat-seeker missile, the player stands stationary wearing a headset.
     if s.missiles[i].active != 0 {
         if (bits & UP) != 0 { s.missiles[i].dir = 1; }
@@ -356,12 +407,23 @@ fn step_player(s: State&, i: i64) {
         let st = max(-sp, min(sp, off));
         if abs(off) <= 24 && !blocked(s, i, x + st, y) { s.players[i].x = x + st; }
     }
+    let tx0 = s.players[i].x / TILE;
+    let ty0 = s.players[i].y / TILE;
+    // Portal teleport for alive player
+    if s.players[i].portal_cd == 0 {
+        let dst = portal_dest(s, tx0, ty0);
+        if dst.x >= 0 {
+            s.players[i].x = dst.x * TILE + TILE / 2;
+            s.players[i].y = dst.y * TILE + TILE / 2;
+            s.players[i].portal_cd = 35;
+        }
+    }
     let tx = s.players[i].x / TILE;
     let ty = s.players[i].y / TILE;
     // Napalm: leave slowly-decaying fire on the tile you just walked out of.
     if s.players[i].napalm > 0 && (tx != otx || ty != oty) {
         let og = s.grid[oty * W + otx];
-        if og == 0 || (og >= 64 && og < 96) { s.grid[oty * W + otx] = 95; }
+        if og == 0 || (og >= 64 && og < 96) || is_fog(og) { s.grid[oty * W + otx] = 95; }
     }
     let g = s.grid[ty * W + tx];
     if is_power(g) {
@@ -405,15 +467,88 @@ fn step_player(s: State&, i: i64) {
     if (bits & BOMB) != 0 && p.held == 0 && !want_mine {
         if p.missiles > 0 && s.missiles[i].active == 0 {
             let mdir: u8 = if (bits & UP) != 0 { 1 } else if (bits & DOWN) != 0 { 2 } else if (bits & LEFT) != 0 { 3 } else if (bits & RIGHT) != 0 { 4 } else { 2 };
-            s.missiles[i] = Missile { s.players[i].x as i32, s.players[i].y as i32, 1, mdir, 300 };
+            s.missiles[i] = Missile { s.players[i].x as i32, s.players[i].y as i32, 1, mdir, 0, 300 };
             s.players[i].missiles -= 1;
         } else if p.placed < p.bombs && bomb_at(s, tx, ty) < 0 {
-            let fl: u8 = if p.unkick != 0 { BOMB_UNKICK } else { 0 };
-            s.bombs.push(Bomb { tx as u8, ty as u8, FUSE, p.range, i as u8, 0, 0, fl });
+            var bx = tx;
+            var by = ty;
+            var fl: u8 = if p.unkick != 0 { BOMB_UNKICK } else { 0 };
+            let pdst = portal_dest(s, bx, by);
+            if pdst.x >= 0 && bomb_at(s, pdst.x, pdst.y) < 0 {
+                bx = pdst.x;
+                by = pdst.y;
+                fl |= BOMB_WARPED;
+            }
+            s.bombs.push(Bomb { bx as u8, by as u8, FUSE, p.range, i as u8, 0, 0, fl });
             s.players[i].placed += 1;
         }
     }
     s.players[i].held = if (bits & BOMB) != 0 { 1 } else { 0 };
+}
+
+// Post-death participation: control a blocking Black Sheep or a fast wall-phasing Fog Ghost.
+fn step_dead(s: State&, i: i64) {
+    let bits = s.players[i].bits;
+    if s.players[i].portal_cd > 0 { s.players[i].portal_cd -= 1; }
+    // Space toggles between Black Sheep and Fog Ghost (when not inside a solid block).
+    if (bits & BOMB) != 0 && s.players[i].held == 0 {
+        if s.players[i].dead_mode == DEAD_SHEEP {
+            s.players[i].dead_mode = DEAD_GHOST;
+        } else if s.players[i].dead_mode == DEAD_GHOST {
+            let tx = s.players[i].x / TILE;
+            let ty = s.players[i].y / TILE;
+            if tx > 0 && tx < W - 1 && ty > 0 && ty < H - 1 && !is_solid(s.grid[ty * W + tx]) && bomb_at(s, tx, ty) < 0 {
+                s.players[i].x = tx * TILE + TILE / 2;
+                s.players[i].y = ty * TILE + TILE / 2;
+                s.players[i].dead_mode = DEAD_SHEEP;
+            }
+        }
+    }
+    s.players[i].held = if (bits & BOMB) != 0 { 1 } else { 0 };
+    let is_gh = s.players[i].dead_mode == DEAD_GHOST;
+    let sp = if is_gh { 7 } else { 4 };
+    var dx = 0;
+    var dy = 0;
+    if (bits & UP) != 0 { dy = -sp; }
+    else if (bits & DOWN) != 0 { dy = sp; }
+    else if (bits & LEFT) != 0 { dx = -sp; }
+    else if (bits & RIGHT) != 0 { dx = sp; }
+    let x = s.players[i].x;
+    let y = s.players[i].y;
+    if is_gh {
+        // Fast Fog Ghost phases through all interior blocks/walls/bombs and leaves thick fog behind!
+        let nx = max(TILE + HB, min((W - 1) * TILE - HB, x + dx));
+        let ny = max(TILE + HB, min((H - 1) * TILE - HB, y + dy));
+        s.players[i].x = nx;
+        s.players[i].y = ny;
+        let tx = nx / TILE;
+        let ty = ny / TILE;
+        let g = s.grid[ty * W + tx];
+        if g == 0 || is_fog(g) { s.grid[ty * W + tx] = 127; }
+    } else {
+        // Black Sheep moves around the arena and blocks alive players and kicked bombs.
+        if dx == 0 && dy == 0 {
+        } else if !dead_sheep_blocked(s, i, x + dx, y + dy) {
+            s.players[i].x = x + dx;
+            s.players[i].y = y + dy;
+        } else if dx != 0 {
+            let off = (y / TILE) * TILE + TILE / 2 - y;
+            let st = max(-sp, min(sp, off));
+            if abs(off) <= 24 && !dead_sheep_blocked(s, i, x, y + st) { s.players[i].y = y + st; }
+        } else if dy != 0 {
+            let off = (x / TILE) * TILE + TILE / 2 - x;
+            let st = max(-sp, min(sp, off));
+            if abs(off) <= 24 && !dead_sheep_blocked(s, i, x + st, y) { s.players[i].x = x + st; }
+        }
+        if s.players[i].portal_cd == 0 {
+            let dst = portal_dest(s, s.players[i].x / TILE, s.players[i].y / TILE);
+            if dst.x >= 0 {
+                s.players[i].x = dst.x * TILE + TILE / 2;
+                s.players[i].y = dst.y * TILE + TILE / 2;
+                s.players[i].portal_cd = 35;
+            }
+        }
+    }
 }
 
 // One 60 Hz step: move, burn, age flames, kill, and decide when a round ends.
@@ -423,9 +558,15 @@ fn tick(s: State&, r: rng&, n: i64) {
         if s.over == 0 { reset_round(s, r); }
         return;
     }
-    for i in 4 { if s.players[i].on != 0 && s.players[i].alive != 0 { step_player(s, i); } }
+    for i in 4 {
+        if s.players[i].on != 0 {
+            if s.players[i].alive != 0 { step_player(s, i); }
+            else if s.players[i].dead_mode != DEAD_NONE { step_dead(s, i); }
+        }
+    }
     for k in 2 {
         guard s.sheep[k].alive != 0 else { continue; }
+        if s.sheep[k].portal_cd > 0 { s.sheep[k].portal_cd -= 1; }
         if s.sheep[k].t == 0 {
             s.sheep[k].dir = r.rand_int(5) as u8;
             s.sheep[k].t = (40 + r.rand_int(80)) as u8;
@@ -435,7 +576,18 @@ fn tick(s: State&, r: rng&, n: i64) {
         let dy = if d == 0 { -2 } else if d == 1 { 2 } else { 0 };
         if d == 4 { continue; }
         if sheep_blocked(s, k, s.sheep[k].x + dx, s.sheep[k].y + dy) { s.sheep[k].t = 0; }
-        else { s.sheep[k].x += dx; s.sheep[k].y += dy; }
+        else {
+            s.sheep[k].x += dx;
+            s.sheep[k].y += dy;
+            if s.sheep[k].portal_cd == 0 {
+                let dst = portal_dest(s, s.sheep[k].x / TILE, s.sheep[k].y / TILE);
+                if dst.x >= 0 {
+                    s.sheep[k].x = dst.x * TILE + TILE / 2;
+                    s.sheep[k].y = dst.y * TILE + TILE / 2;
+                    s.sheep[k].portal_cd = 35;
+                }
+            }
+        }
     }
     for i in s.bombs.len { s.bombs[i].t -= 1; }
     for i in s.bombs.len {
@@ -447,7 +599,20 @@ fn tick(s: State&, r: rng&, n: i64) {
         let nx = b.x as i64 + (if b.dir == 3 { -1 } else if b.dir == 4 { 1 } else { 0 });
         let ny = b.y as i64 + (if b.dir == 1 { -1 } else if b.dir == 2 { 1 } else { 0 });
         if bomb_stopped(s, nx, ny) { s.bombs[i].dir = 0; }
-        else { s.bombs[i].x = nx as u8; s.bombs[i].y = ny as u8; }
+        else {
+            var fx = nx;
+            var fy = ny;
+            let dst = portal_dest(s, fx, fy);
+            if dst.x >= 0 && (s.bombs[i].flags & BOMB_WARPED) == 0 && bomb_at(s, dst.x, dst.y) < 0 {
+                fx = dst.x;
+                fy = dst.y;
+                s.bombs[i].flags |= BOMB_WARPED;
+            } else if !is_portal(s, fx, fy) {
+                s.bombs[i].flags &= (255 - BOMB_WARPED);
+            }
+            s.bombs[i].x = fx as u8;
+            s.bombs[i].y = fy as u8;
+        }
     }
     loop {
         var again = false;
@@ -492,6 +657,15 @@ fn tick(s: State&, r: rng&, n: i64) {
         if ntx <= 0 || ntx >= W - 1 || nty <= 0 || nty >= H - 1 || is_solid(s.grid[nty * W + ntx]) || bomb_at(s, ntx, nty) >= 0 {
             boom = true;
         } else {
+            if s.missiles[i].portal_cd > 0 { s.missiles[i].portal_cd -= 1; }
+            if s.missiles[i].portal_cd == 0 {
+                let dst = portal_dest(s, ntx, nty);
+                if dst.x >= 0 {
+                    nx = dst.x * TILE + TILE / 2;
+                    ny = dst.y * TILE + TILE / 2;
+                    s.missiles[i].portal_cd = 16;
+                }
+            }
             s.missiles[i].x = nx as i32;
             s.missiles[i].y = ny as i32;
             for j in 4 {
@@ -549,6 +723,15 @@ fn tick(s: State&, r: rng&, n: i64) {
             }
         }
     }
+    // Fog clouds (96..127) left by dead Fog Ghosts linger and slowly dissipate.
+    if n % 10 == 0 {
+        for i in W * H {
+            let g = s.grid[i];
+            if g >= 96 {
+                s.grid[i] = if g > 96 { g - 1 } else { 0 };
+            }
+        }
+    }
     // Randomly spawn new blocks when the arena gets too empty, at a host-controllable rate.
     if s.regrow > 0 {
         let iv = max(18, 260 - (s.regrow as i64) * 24 / 10);
@@ -562,10 +745,11 @@ fn tick(s: State&, r: rng&, n: i64) {
                 for tries in 24 {
                     let tx = 1 + r.rand_int(W - 2);
                     let ty = 1 + r.rand_int(H - 2);
-                    if s.grid[ty * W + tx] != 0 || bomb_at(s, tx, ty) >= 0 || mine_at(s, tx, ty) >= 0 { continue; }
+                    let cur = s.grid[ty * W + tx];
+                    if (cur != 0 && !is_fog(cur)) || is_portal(s, tx, ty) || bomb_at(s, tx, ty) >= 0 || mine_at(s, tx, ty) >= 0 { continue; }
                     var clear = true;
                     for i in 4 {
-                        guard s.players[i].on != 0 && s.players[i].alive != 0 else { continue; }
+                        guard s.players[i].on != 0 && (s.players[i].alive != 0 || s.players[i].dead_mode == DEAD_SHEEP) else { continue; }
                         if abs(s.players[i].x / TILE - tx) <= 1 && abs(s.players[i].y / TILE - ty) <= 1 { clear = false; }
                     }
                     for k in 2 {
@@ -590,7 +774,11 @@ fn tick(s: State&, r: rng&, n: i64) {
         guard s.players[i].on != 0 else { continue; }
         joined += 1;
         if s.players[i].alive != 0 {
-            if is_flame(s.grid[(s.players[i].y / TILE) * W + s.players[i].x / TILE]) { s.players[i].alive = 0; }
+            if is_flame(s.grid[(s.players[i].y / TILE) * W + s.players[i].x / TILE]) {
+                s.players[i].alive = 0;
+                s.players[i].dead_mode = DEAD_SHEEP;
+                s.players[i].held = 1;
+            }
             else { alive += 1; last = i; }
         }
     }
@@ -689,7 +877,7 @@ thread_fn client(url: u8[..64]) {
 
 // ---- sound ------------------------------------------------------------------------------------
 
-struct Sfx { place: audio::Sound, boom: audio::Sound, pickup: audio::Sound, die: audio::Sound, win: audio::Sound, clank: audio::Sound, dance: audio::Sound }
+struct Sfx { place: audio::Sound, boom: audio::Sound, pickup: audio::Sound, die: audio::Sound, win: audio::Sound, clank: audio::Sound, dance: audio::Sound, warp: audio::Sound }
 struct Fx { shake: f32, lost: bool, dust: float4[..64], last: float2[4] }
 
 // A synthesized effect: a sine sweeping f0 to f1 mixed with low-passed noise, under a decaying envelope.
@@ -727,7 +915,7 @@ fn make_dance_sfx() -> audio::Sound {
 fn make_sfx(r: rng&) -> Sfx {
     Sfx { synth(r, 0.12, 220.0, 110.0, 0.1, 6.0), synth(r, 0.7, 90.0, 35.0, 0.85, 4.5), synth(r, 0.25, 500.0, 1100.0, 0.0, 5.0),
           synth(r, 0.6, 400.0, 60.0, 0.1, 3.0), synth(r, 0.7, 523.0, 1318.0, 0.0, 2.0), synth(r, 0.1, 1200.0, 800.0, 0.5, 12.0),
-          make_dance_sfx() }
+          make_dance_sfx(), synth(r, 0.28, 320.0, 1320.0, 0.12, 4.0) }
 }
 
 // Adds midi note m at sample `at` for n samples: kind 0 is a 50% pulse, 1 a 25% pulse, 2 a triangle.
@@ -1008,6 +1196,7 @@ fn hear(prev: State&, s: State&, sfx: Sfx, fx: Fx&) {
         guard a.on != 0 && b.on != 0 else { continue; }
         let vol = if i == s.you { 0.8 } else { 0.4 };
         if a.alive != 0 && b.alive == 0 { audio::play(sfx.die, 0.8, pan(b.x), 1.0, false); }
+        if abs(b.x - a.x) + abs(b.y - a.y) > TILE * 2 { audio::play(sfx.warp, vol, pan(b.x), 1.0, false); }
         let got_pwr = b.range + b.bombs + b.speed + b.mines + b.missiles > a.range + a.bombs + a.speed + a.mines + a.missiles ||
                       (a.ghost == 0 && b.ghost > 0) || (a.kick == 0 && b.kick > 0) || (a.unkick == 0 && b.unkick > 0) ||
                       (a.napalm == 0 && b.napalm > 0) || (a.drunk == 0 && b.drunk > 0);
@@ -1802,6 +1991,94 @@ fn draw_dance(c: ui::Context, s: State&, who: i64, size: int2, tm: f32) {
     text(c, (sw - sw2) * 0.5, sh - 63.0, sub, ui::rgb(255, 225, 90));
 }
 
+// Swirling glowing portal (idx 0 = Cyan, idx 1 = Orange).
+fn draw_portal(c: ui::Context, idx: i64, x: f32, y: f32, t: f32, tm: f32) {
+    let cx = x + t * 0.5;
+    let cy = y + t * 0.5;
+    let outer = if idx == 0 { ui::rgb(45, 205, 255) } else { ui::rgb(255, 145, 35) };
+    let inner = if idx == 0 { ui::rgba(140, 240, 255, 190) } else { ui::rgba(255, 210, 120, 190) };
+    let core = if idx == 0 { ui::rgb(20, 60, 110) } else { ui::rgb(110, 42, 15) };
+    let pulse = 0.84 + 0.08 * sin(tm * 6.0 + idx as f32 * 3.14);
+    let r = t * 0.44 * pulse;
+    ui::fill_circle(c, ui::rect(cx - r * 1.15, cy - r * 1.15, r * 2.3, r * 2.3), if idx == 0 { ui::rgba(45, 205, 255, 55) } else { ui::rgba(255, 145, 35, 55) });
+    ui::fill_circle(c, ui::rect(cx - r, cy - r, r * 2.0, r * 2.0), core);
+    ui::stroke_circle(c, ui::rect(cx - r, cy - r, r * 2.0, r * 2.0), 3.5, outer);
+    ui::stroke_circle(c, ui::rect(cx - r * 0.62, cy - r * 0.62, r * 1.24, r * 1.24), 2.5, inner);
+    for k in 4 {
+        let a = tm * (if idx == 0 { 4.2 } else { -4.2 }) + k as f32 * 1.5708;
+        let sx = cx + cos(a) * r * 0.72;
+        let sy = cy + sin(a) * r * 0.72;
+        ui::fill_circle(c, ui::rect(sx - 3.5, sy - 3.5, 7.0, 7.0), ui::rgb(255, 255, 255));
+    }
+}
+
+// Reincarnated dead player as a controllable blocking Black Sheep.
+fn draw_black_sheep(c: ui::Context, s: State&, i: i64, x: f32, y: f32, t: f32, tm: f32) {
+    let k = t * 0.8;
+    let bits = s.players[i].bits;
+    let bob = if (bits & 15) != 0 { 0.04 * t * sin(tm * 18.0) } else { 0.0 };
+    let wool = ui::rgb(34, 34, 42);
+    let hi = ui::rgb(58, 58, 70);
+    ui::fill_circle(c, ui::rect(x - k * 0.55, y + k * 0.25, k * 1.1, k * 0.35), ui::rgba(0, 0, 0, 110));
+    for l in 2 { ui::fill_rect(c, ui::rect(x - k * 0.26 + l * k * 0.32, y + k * 0.28, k * 0.1, k * 0.2), 2.0, ui::rgb(22, 20, 26)); }
+    ui::fill_circle(c, ui::rect(x - k * 0.5, y - k * 0.42 + bob, k, k * 0.95), ui::rgb(20, 20, 26));
+    for n in 7 {
+        let a: f32 = n as f32 * 0.9;
+        ui::fill_circle(c, ui::rect(x + cos(a) * k * 0.28 - k * 0.2, y + sin(a) * k * 0.26 - k * 0.12 + bob, k * 0.4, k * 0.4), wool);
+    }
+    ui::fill_circle(c, ui::rect(x - k * 0.34, y - k * 0.34 + bob, k * 0.68, k * 0.72), hi);
+    ui::stroke_circle(c, ui::rect(x - k * 0.46, y - k * 0.42 + bob, k * 0.92, k * 0.9), 2.5, col(i));
+    ui::fill_rect(c, ui::rect(x - k * 0.17, y - k * 0.18 + bob, k * 0.34, k * 0.46), k * 0.15, ui::rgb(26, 24, 32));
+    // Mischievous glowing yellow eyes
+    ui::fill_circle(c, ui::rect(x - k * 0.12, y - k * 0.08 + bob, k * 0.08, k * 0.08), ui::rgb(255, 225, 65));
+    ui::fill_circle(c, ui::rect(x + k * 0.04, y - k * 0.08 + bob, k * 0.08, k * 0.08), ui::rgb(255, 225, 65));
+    ui::fill_rect(c, ui::rect(x - k * 0.34, y - k * 0.14 + bob, k * 0.2, k * 0.06), 2.0, ui::rgb(18, 16, 22));
+    ui::fill_rect(c, ui::rect(x + k * 0.14, y - k * 0.14 + bob, k * 0.2, k * 0.06), 2.0, ui::rgb(18, 16, 22));
+    marker(c, i, x, y - k * 0.72 + bob, t * 0.12);
+    if s.players[i].name.len > 0 {
+        let nw = ui::text_width(ui::font(c), s.players[i].name[..]);
+        ui::fill_rect(c, ui::rect(x - nw * 0.5 - 4.0, y + k * 0.44, nw + 8.0, 20.0), 4.0, ui::rgba(10, 12, 20, 165));
+        text(c, x - nw * 0.5, y + k * 0.43, s.players[i].name[..], ui::rgb(210, 210, 220));
+    }
+}
+
+// Reincarnated dead player as a fast wall-phasing Fog Ghost.
+fn draw_fog_ghost(c: ui::Context, s: State&, i: i64, x: f32, y: f32, t: f32, tm: f32) {
+    let k = t * 0.78;
+    let bob = sin(tm * 7.0 + i as f32) * k * 0.08;
+    let body = ui::rgba(205, 225, 255, 165);
+    let rim = col(i);
+    ui::fill_circle(c, ui::rect(x - k * 0.38, y - k * 0.46 + bob, k * 0.76, k * 0.7), body);
+    ui::fill_rect(c, ui::rect(x - k * 0.38, y - k * 0.12 + bob, k * 0.76, k * 0.44), 0.0, body);
+    for w in 3 {
+        let wx = x - k * 0.38 + (w as f32) * k * 0.253;
+        let wy = y + k * 0.24 + bob + sin(tm * 12.0 + w as f32) * k * 0.05;
+        ui::fill_circle(c, ui::rect(wx, wy, k * 0.26, k * 0.22), body);
+    }
+    ui::stroke_circle(c, ui::rect(x - k * 0.42, y - k * 0.5 + bob, k * 0.84, k * 0.84), 2.0, ui::rgba(rim.r, rim.g, rim.b, 170));
+    // Glowing cyan eyes
+    ui::fill_circle(c, ui::rect(x - k * 0.18, y - k * 0.2 + bob, k * 0.12, k * 0.15), ui::rgb(40, 235, 255));
+    ui::fill_circle(c, ui::rect(x + k * 0.06, y - k * 0.2 + bob, k * 0.12, k * 0.15), ui::rgb(40, 235, 255));
+    marker(c, i, x, y - k * 0.74 + bob, t * 0.11);
+    if s.players[i].name.len > 0 {
+        let nw = ui::text_width(ui::font(c), s.players[i].name[..]);
+        ui::fill_rect(c, ui::rect(x - nw * 0.5 - 4.0, y + k * 0.46, nw + 8.0, 20.0), 4.0, ui::rgba(10, 12, 20, 145));
+        text(c, x - nw * 0.5, y + k * 0.45, s.players[i].name[..], ui::rgb(190, 225, 255));
+    }
+}
+
+// Thick fog clouds left behind by dead Fog Ghosts, obscuring the arena for alive players.
+fn draw_fog(c: ui::Context, g: u8, x: f32, y: f32, t: f32, tm: f32, viewer_ghost: bool) {
+    let life = ((g - 96) as f32 + 1.0) / 32.0;
+    let base_a = if viewer_ghost { 115.0 } else { 235.0 };
+    let a = (base_a * min(1.0, life * 1.4)) as i64;
+    let drift = sin(tm * 2.2 + x * 0.05 + y * 0.04) * t * 0.08;
+    let r = t * 0.68;
+    ui::fill_circle(c, ui::rect(x + t * 0.5 - r + drift, y + t * 0.5 - r, r * 2.0, r * 2.0), ui::rgba(182, 196, 214, a));
+    ui::fill_circle(c, ui::rect(x + t * 0.25 - r * 0.6 - drift, y + t * 0.35 - r * 0.6, r * 1.2, r * 1.2), ui::rgba(216, 226, 240, a));
+    ui::fill_circle(c, ui::rect(x + t * 0.72 - r * 0.55 + drift * 0.6, y + t * 0.68 - r * 0.55, r * 1.1, r * 1.1), ui::rgba(164, 178, 198, a));
+}
+
 fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&, mode: const u8[:]) {
     let size = gfx::screen_size();
     let tm = gfx::time() as f32;
@@ -1826,6 +2103,10 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
                 else if is_flame(g) { draw_flame(hud, g, x, y, t, tm); }
             }
         }
+        if s.portals_on != 0 {
+            draw_portal(hud, 0, ox + s.portals[0] * t, oy + s.portals[1] * t, t, tm);
+            draw_portal(hud, 1, ox + s.portals[2] * t, oy + s.portals[3] * t, t, tm);
+        }
         for m in s.mines { draw_mine(hud, s, m, ox, oy, t, tm); }
         for b in s.bombs { draw_bomb(hud, s, b, ox, oy, t, tm); }
         for k in 2 {
@@ -1837,26 +2118,49 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
             ui::fill_circle(hud, ui::rect(ox + d.x / TILE * t - r, oy + d.y / TILE * t - r - d.z * 0.25, r * 2.0, r * 2.0), ui::rgba(220, 215, 200, (50.0 * a) as i64));
         }
         for i in 4 {
-            if s.players[i].on != 0 && s.players[i].alive != 0 {
-                draw_player(hud, s, i, ox + shown[i].x / TILE * t, oy + shown[i].y / TILE * t, t, tm);
+            if s.players[i].on != 0 {
+                let px = ox + shown[i].x / TILE * t;
+                let py = oy + shown[i].y / TILE * t;
+                if s.players[i].alive != 0 { draw_player(hud, s, i, px, py, t, tm); }
+                else if s.players[i].dead_mode == DEAD_SHEEP { draw_black_sheep(hud, s, i, px, py, t, tm); }
             }
         }
         for i in 4 {
             if s.missiles[i].active != 0 { draw_missile(hud, s.missiles[i], i, ox, oy, t, tm); }
         }
-        // Bottom status strip for the local player's active special power-ups
+        // Fog clouds drawn OVER the arena so Fog Ghosts genuinely obscure vision!
+        let viewer_ghost = s.players[s.you].alive == 0 && s.players[s.you].dead_mode == DEAD_GHOST;
+        for ty in H {
+            for tx in W {
+                let g = s.grid[ty * W + tx];
+                if is_fog(g) { draw_fog(hud, g, ox + tx * t, oy + ty * t, t, tm, viewer_ghost); }
+            }
+        }
+        // Dead Fog Ghosts float above the fog clouds
+        for i in 4 {
+            if s.players[i].on != 0 && s.players[i].alive == 0 && s.players[i].dead_mode == DEAD_GHOST {
+                draw_fog_ghost(hud, s, i, ox + shown[i].x / TILE * t, oy + shown[i].y / TILE * t, t, tm);
+            }
+        }
+        // Bottom status strip for active power-ups or post-death controls
         let me = s.players[s.you];
         var st: u8[>..] = [];
-        if s.missiles[s.you].active != 0 { st.append("GUIDING MISSILE (Arrows/WASD steer, Space detonate)  "); }
-        else if me.missiles > 0 { format(st, "Missile x", me.missiles, " [Space]  "); }
-        if me.mines > 0 { format(st, "Mines x", me.mines, " [E/X]  "); }
-        if me.napalm > 0 { st.append("NAPALM  "); }
-        if me.drunk > 0 { st.append("DRUNK!  "); }
-        if me.unkick != 0 { st.append("AnchorBombs  "); }
-        if me.slow > 0 { st.append("CURSED(Slow+Range)  "); }
-        if st.len > 0 && me.alive != 0 {
+        if me.alive == 0 && me.dead_mode == DEAD_SHEEP {
+            st.append("BLACK SHEEP (block alive players!)  -  [Space] Switch to Fog Ghost");
+        } else if me.alive == 0 && me.dead_mode == DEAD_GHOST {
+            st.append("FOG GHOST (fast, phase through walls, leave fog!)  -  [Space] Switch to Black Sheep");
+        } else if me.alive != 0 {
+            if s.missiles[s.you].active != 0 { st.append("GUIDING MISSILE (Arrows/WASD steer, Space detonate)  "); }
+            else if me.missiles > 0 { format(st, "Missile x", me.missiles, " [Space]  "); }
+            if me.mines > 0 { format(st, "Mines x", me.mines, " [E/X]  "); }
+            if me.napalm > 0 { st.append("NAPALM  "); }
+            if me.drunk > 0 { st.append("DRUNK!  "); }
+            if me.unkick != 0 { st.append("AnchorBombs  "); }
+            if me.slow > 0 { st.append("CURSED(Slow+Range)  "); }
+        }
+        if st.len > 0 {
             let sw0 = ui::text_width(ui::font(hud), st);
-            ui::fill_rect(hud, ui::rect((size.x as f32 - sw0) * 0.5 - 12.0, size.y as f32 - 30.0, sw0 + 24.0, 26.0), 6.0, ui::rgba(10, 12, 20, 190));
+            ui::fill_rect(hud, ui::rect((size.x as f32 - sw0) * 0.5 - 12.0, size.y as f32 - 30.0, sw0 + 24.0, 26.0), 6.0, ui::rgba(10, 12, 20, 195));
             text(hud, (size.x as f32 - sw0) * 0.5, size.y as f32 - 28.0, st, ui::rgb(255, 225, 110));
         }
         ui::fill_rect(hud, ui::rect(0, 0, size.x, top - 10.0), 0.0, ui::rgba(10, 12, 20, 200));
@@ -2027,6 +2331,7 @@ fn main() {
     s.drops = 33;
     s.regrow = 35;
     s.map = init_map;
+    s.portals_on = 1;
     s.power_mask = PWR_ALL;
     reset_round(s, r);
     if mode == "host" {
@@ -2112,6 +2417,8 @@ fn main() {
                 let back = min((seq - s.ack) & 65535, hist.len);
                 if c.players[s.you].alive != 0 {
                     for j in hist.len - back..hist.len { c.players[s.you].bits = hist[j]; step_player(c, s.you); }
+                } else if c.players[s.you].dead_mode != DEAD_NONE {
+                    for j in hist.len - back..hist.len { c.players[s.you].bits = hist[j]; step_dead(c, s.you); }
                 }
                 let ex = c.players[s.you].x - px;
                 let ey = c.players[s.you].y - py;
@@ -2133,6 +2440,7 @@ fn main() {
                 c.players[s.you].y = py;
                 c.players[s.you].bits = bits;
                 if c.players[s.you].alive != 0 { step_player(c, s.you); }
+                else if c.players[s.you].dead_mode != DEAD_NONE { step_dead(c, s.you); }
                 px = c.players[s.you].x;
                 py = c.players[s.you].y;
             }
@@ -2297,6 +2605,14 @@ fn main() {
                 ui::checkbox_label(menu, "Curse (Slow + Range)", p9);
                 ui::layout_row_dynamic(menu, 23.0, 2);
                 ui::checkbox_label(menu, "Unkickable Bombs", p10);
+                var p_on = s.portals_on != 0;
+                if ui::checkbox_label(menu, "Portals Enabled", p_on) {
+                    s.portals_on = if p_on { 1 } else { 0 };
+                    if s.portals_on != 0 {
+                        s.grid[(s.portals[1] as i64) * W + (s.portals[0] as i64)] = 0;
+                        s.grid[(s.portals[3] as i64) * W + (s.portals[2] as i64)] = 0;
+                    }
+                }
                 var nm: u16 = 0;
                 if p0 { nm |= PWR_FLAME; }
                 if p1 { nm |= PWR_BOMB; }

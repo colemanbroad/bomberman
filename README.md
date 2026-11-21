@@ -10,19 +10,17 @@ goose build bomberman.goose
 ./bomberman                      # solo
 ```
 
-Arrows/WASD move, Space drops a bomb, hold Shift to stand your ground (you freeze and others cannot walk through you), M mutes the music, N switches between the two built-in tracks (the fun one and a dark, heavy one), Escape quits. Up to 4 players. Clients predict their own movement and
-the host sends a snapshot every 60 Hz tick.
+Arrows/WASD move, Space drops a bomb (or launches/detonates a Heat-Seeker Missile, or switches afterlife forms when dead), `E`/`X` (or `Shift+Space`) drops a proximity mine, hold Shift to stand your ground (you freeze and others cannot walk through you), M mutes the music, N cycles through all built-in tracks, Escape closes menus or quits. Up to 4 players. Clients predict their own movement and the host sends a snapshot every 60 Hz tick.
 
+- **Profiles & Win Streaks**: Click **Profile** to enter your custom name (or pass `--name NAME`) and pick your farm animal. Consecutive round wins track your win streak, and every 5 wins triggers a full-screen spotlight victory dance in everyone's faces.
+- **Farm Characters & Themed Bombs**: Goose (eggs), Squirrel (acorns), Baby (diapers), Cow (cow patties), Pig (bacon), and Farmer (hay bales).
+- **Maps & Music**: Choose between **Tropical Island**, **Forest**, **Mountains**, and **Desert** (each with its own visuals, layout flavor, and original procedural soundtrack; pass `--map 0..3` or change live in **Host Settings**).
+- **Host Settings**: Click **Host Settings** to toggle which power-ups can spawn, switch maps, toggle portals, adjust power-up drop rate (default 33%), and tune wall/block regrowth rate when the field gets empty.
+- **Power-Ups**: Flame (range+), Bomb (extra bomb), Bolt (speed+), Ghost (10 s invisibility), Kick Boot (kick bombs), Heat-Seeker Missile (stand stationary wearing a headset while steering a guided missile), Napalm (leaves a slowly decaying trail of fire behind you), Proximity Mines (`E`/`X` or `Shift+Space`), Drunk (random jitter to fight against, plus every other positive power), Curse/Bad (longer fire, slower movement), and Unkickable Bombs (anchored bombs that refuse to slide).
+- **Portals & Afterlife**: Linked Cyan ↔ Orange portals teleport characters, sheep, bombs, and missiles. When eliminated in multiplayer, participate immediately as a controllable **Black Sheep** (blocks alive players & kicked bombs) or press `Space` to switch to a fast **Fog Ghost** (phases through walls and leaves thick obscuring fog).
 - `build-portable.sh` (macOS) relinks OpenSSL statically and zips a binary that runs on any Apple Silicon Mac.
 - `windows/` has a build script and notes for Windows (untested).
 - Needs CMake and OpenSSL to build (the WebSocket client's TLS package). `Roboto-Regular.ttf` is Apache 2.0.
-
-Power-ups: flame (range), bomb (extra bomb), bolt (speed), the orange boot (kick: run into a bomb and it slides until something solid stops it), and the purple ghost (10 s): you turn invisible to
-everyone else, leaving only a faint trail of dust while you move. You still see a faint outline of yourself.
-
-Characters: player 2 is a goose, and her bombs are eggs. Two sheep wander at random and block the way like movable
-blocks (flames kill them; they return next round). The host (or solo player) has a slider in the top bar for the
-percentage of burned bricks that leave a power-up (default 33). Gift crates always drop one.
 
 Your own music: put a 16-bit WAV named `music.wav` in the folder you launch the game from and it loops instead of the
 chiptune (M still mutes). Convert a track you own on a Mac with
