@@ -23,3 +23,8 @@ everyone else, leaving only a faint trail of dust while you move. You still see 
 Characters: player 2 is a goose, and her bombs are eggs. Two sheep wander at random and block the way like movable
 blocks (flames kill them; they return next round). The host (or solo player) has a slider in the top bar for the
 percentage of burned bricks that leave a power-up (default 33). Gift crates always drop one.
+
+Your own music: put a 16-bit WAV named `music.wav` in the folder you launch the game from and it loops instead of the
+chiptune (M still mutes). Convert a track you own on a Mac with
+`afconvert -f WAVE -d LEI16 song.mp3 music.wav`, or anywhere with `ffmpeg -i song.mp3 -c:a pcm_s16le music.wav`.
+Each player uses their own file. `music.wav` is git-ignored, so it never lands in the repo.

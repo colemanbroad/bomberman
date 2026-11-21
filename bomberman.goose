@@ -805,6 +805,48 @@ fn overlay(height: f32) -> ui::Context {
     return c;
 }
 
+// Little-endian integer of n bytes at i.
+fn le(raw: const u8[:], i: i64, n: i64) -> i64 {
+    var v = 0;
+    for k in n { v |= (raw[i + k] as i64) << (8 * k); }
+    return v;
+}
+
+fn is_tag(raw: const u8[:], i: i64, t: const u8[:]) -> bool {
+    for k in 4 { if raw[i + k] != t[k] { return false; } }
+    return true;
+}
+
+// Reads 16-bit PCM WAV bytes into f32 samples; info gets sample rate then channel count.
+fn wav_pcm(raw: const u8[:], pcm: f32[>..]&, info: i64[>..]&) -> bool {
+    var pos = 12;
+    var ok = false;
+    var rate = 0;
+    var ch = 0;
+    while pos + 8 <= raw.len {
+        let size = le(raw, pos + 4, 4);
+        if is_tag(raw, pos, "fmt ") {
+            ok = le(raw, pos + 8, 2) == 1 && le(raw, pos + 22, 2) == 16;
+            ch = le(raw, pos + 10, 2);
+            rate = le(raw, pos + 12, 4);
+        } else if is_tag(raw, pos, "data") {
+            guard ok && (ch == 1 || ch == 2) else { return false; }
+            let n = min(size, raw.len - pos - 8) / 2;
+            pcm.resize(n, 0.0);
+            for j in n {
+                var v = le(raw, pos + 8 + 2 * j, 2);
+                if v >= 32768 { v -= 65536; }
+                pcm[j] = v as f32 / 32768.0;
+            }
+            info.push(rate);
+            info.push(ch);
+            return true;
+        }
+        pos += 8 + size + size % 2;
+    }
+    return false;
+}
+
 fn main() {
     let argv = args();
     let mode = if argv.len > 1 { argv[1] } else { "solo" };
@@ -831,7 +873,14 @@ fn main() {
     guard gfx::open("Bomberman", 960, 720, gfx::WINDOW_RESIZABLE) else { abort(str("gfx: ", gfx::error())); }
     audio::open();
     let sfx = make_sfx(r);
-    let tune = audio::play(make_music(r), 0.2, 0.0, 1.0, true);
+    // Your own music: put a 16-bit PCM WAV named music.wav next to the game and it plays instead of the chiptune.
+    var wav: u8[>..] = [];
+    var pcm: f32[>..] = [];
+    var info: i64[>..] = [];
+    let own = file_exists("music.wav") && read_file("music.wav", wav) && wav_pcm(wav, pcm, info);
+    if own { print("playing music.wav: ", info[0], " Hz, ", info[1], " channels"); }
+    let mvol: f32 = if own { 0.5 } else { 0.2 };
+    let tune = if own { audio::play(audio::create_sound(pcm, info[0], info[1]), mvol, 0.0, 1.0, true) } else { audio::play(make_music(r), mvol, 0.0, 1.0, true) };
     var muted = false;
     let hud = overlay(20.0);
     let big = overlay(72.0);
@@ -846,7 +895,7 @@ fn main() {
     var frame = 0;
     while gfx::frame() {
         if gfx::key_pressed("Escape") || frame == frames { break; }
-        if gfx::key_pressed("M") { muted = !muted; audio::set_voice(tune, if muted { 0.0 } else { 0.2 }, 0.0, 1.0); }
+        if gfx::key_pressed("M") { muted = !muted; audio::set_voice(tune, if muted { 0.0 } else { mvol }, 0.0, 1.0); }
         ui::input_from_gfx(hud);
         ui::input_from_gfx(big);
         ui::input_from_gfx(panel);

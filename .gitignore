@@ -3,3 +3,5 @@ bomberman-portable
 *.zip
 dist/
 *.log
+music.wav
+*.mp3
