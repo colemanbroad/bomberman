@@ -37,11 +37,12 @@ struct Player { x: i64, y: i64, on: u8, alive: u8, bombs: u8, range: u8, speed: 
 struct Bomb { x: u8, y: u8, t: u8, range: u8, owner: u8, dir: u8, m: u8 }
 // A sheep wanders at random and blocks the way like a movable block. dir: 0 up, 1 down, 2 left, 3 right, 4 grazing.
 struct Sheep { x: i64, y: i64, alive: u8, dir: u8, t: u8 }
-struct State { grid: u8[195], players: Player[4], bombs: Bomb[..16], sheep: Sheep[2], drops: u8, over: i64, you: u8 }   // drops: percent of brick fires that leave a power-up
+struct State { grid: u8[195], players: Player[4], bombs: Bomb[..16], sheep: Sheep[2], drops: u8, over: i64, you: u8, ack: i64 }   // drops: percent of brick fires that leave a power-up
 
 // Host: input from a connection (reply names it). Client: the key bits to send.
-struct Msg { reply: http::MailAddress, bits: u8, leave: bool }
-struct Pad { bits: u8 }
+// seq numbers a client's input steps; the host echoes the latest one it has seen in State.ack.
+struct Msg { reply: http::MailAddress, bits: u8, leave: bool, seq: i64 }
+struct Pad { bits: u8, seq: i64 }
 struct Lost { code: i64 }
 
 // ---- simulation -------------------------------------------------------------------------------
@@ -330,10 +331,10 @@ fn serve_event(ev: http::Event, st: Conn&, out: http::Reply) {
     } else if ev.kind == http::TIMEOUT {
         http::later(out, 5000);
     } else {
-        if ev.kind == http::CLOSED && st.reply.key != 0 { qput(Msg { st.reply, 0, true }); }
+        if ev.kind == http::CLOSED && st.reply.key != 0 { qput(Msg { st.reply, 0, true, 0 }); }
         http::ws_read(ev, st.ws, out) { op, data, o =>
             if st.reply.key == 0 { st.reply = http::later(o, 5000); }
-            if data.len > 0 { qput(Msg { st.reply, data[0], false }); }
+            if data.len >= 3 { qput(Msg { st.reply, data[0], false, (data[1] as i64) | ((data[2] as i64) << 8) }); }
         };
     }
 }
@@ -348,9 +349,12 @@ thread_fn client(url: u8[..64]) {
     var conn, err = http::ws_client_connect(session, url[..]);
     guard err.code == 0 else { write_stderr(str("connect: ", err.call, " ", err.code, "\n")); qput(Lost { 1 }); return; }
     var bits: u8 = 0;
+    var seq = 0;
     loop {
         var one: u8[>..] = [];
         one.push(bits);
+        one.push((seq & 255) as u8);
+        one.push((seq >> 8) as u8);
         guard http::ws_client_binary(conn, one).code == 0 else { break; }
         let m, e = http::ws_client_recv(conn);
         guard e.code == 0 else { break; }
@@ -360,6 +364,7 @@ thread_fn client(url: u8[..64]) {
             let p, ok = qpoll<Pad>();
             guard ok else { break; }
             bits = p.bits;
+            seq = p.seq;
         }
     }
     qput(Lost { 2 });
@@ -908,6 +913,7 @@ fn main() {
     var s = State { .. };
     var prev = State { .. };
     var r = rng { random_seed() };
+    var ack: i64[4] = [0, 0, 0, 0];
     let none = http::MailAddress { .. };
     var addr: http::MailAddress[4] = [none, none, none, none];
     s.players[0].on = 1;
@@ -943,6 +949,8 @@ fn main() {
     let z = float2 { 0.0, 0.0 };
     var shown: float2[4] = [z, z, z, z];
     var fx = Fx { .. };
+    var seq = 0;         // client: number of the latest input step
+    var hist: u8[..240] = [];       // the key bits of the last steps, to replay on top of a snapshot
     var px = 0;          // client: where this player is predicted to be
     var py = 0;
     var acc = 0.0;
@@ -963,15 +971,20 @@ fn main() {
         let bits = if frames >= 0 { bot(frame, if mode == "join" { 3 } else { 0 }) } else { keys() };
         acc += if frames >= 0 { 1.0 / 60.0 } else { min(gfx::delta_time(), 0.1) };
         if mode == "join" {
-            qput(Pad { bits });
             loop {
                 let f, got = qpoll<State>();
                 guard got else { break; }
                 s = f;
-                let ex = s.players[s.you].x - px;
-                let ey = s.players[s.you].y - py;
-                if abs(ex) + abs(ey) > 80 { px = s.players[s.you].x; py = s.players[s.you].y; }
-                else if bits == 0 { px += ex / 3; py += ey / 3; }
+                // The snapshot is a round trip old: replay the inputs the host has not seen, then ease toward that.
+                var c = s;
+                let back = min((seq - s.ack) & 65535, hist.len);
+                if c.players[s.you].alive != 0 {
+                    for j in hist.len - back..hist.len { c.players[s.you].bits = hist[j]; step_player(c, s.you); }
+                }
+                let ex = c.players[s.you].x - px;
+                let ey = c.players[s.you].y - py;
+                if abs(ex) + abs(ey) > TILE { px = c.players[s.you].x; py = c.players[s.you].y; }
+                else { px += ex / 3; py += ey / 3; }
                 hear(prev, s, sfx, fx);
                 prev = s;
             }
@@ -980,6 +993,9 @@ fn main() {
             // Predict our own player with the same rules, so keys answer at once.
             while acc >= 1.0 / 60.0 {
                 acc -= 1.0 / 60.0;
+                seq = (seq + 1) & 65535;
+                if hist.len >= 240 { remove_at(hist, 0); }
+                hist.push(bits);
                 var c = s;
                 c.players[s.you].x = px;
                 c.players[s.you].y = py;
@@ -988,6 +1004,7 @@ fn main() {
                 px = c.players[s.you].x;
                 py = c.players[s.you].y;
             }
+            qput(Pad { bits, seq });
         } else {
             s.players[0].bits = bits;
             loop {
@@ -1001,7 +1018,7 @@ fn main() {
                 }
                 if who < 0 { continue; }
                 if m.leave { s.players[who].on = 0; s.players[who].alive = 0; }
-                else { s.players[who].bits = m.bits; }
+                else { s.players[who].bits = m.bits; ack[who] = m.seq; }
             }
             while acc >= 1.0 / 60.0 {
                 acc -= 1.0 / 60.0;
@@ -1011,6 +1028,7 @@ fn main() {
                     guard s.players[i].on != 0 else { continue; }
                     var c = s;
                     c.you = i as u8;
+                    c.ack = ack[i];
                     if http::mail_send_value(addr[i], 0, c) == http::STALE { s.players[i].on = 0; s.players[i].alive = 0; }
                 }
             }
