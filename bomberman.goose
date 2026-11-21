@@ -25,11 +25,13 @@ let DOWN = 2;
 let LEFT = 4;
 let RIGHT = 8;
 let BOMB = 16;
+let HOLD = 32;               // stand your ground: you can't move, and others can't walk through you
+let GHOST = 600;             // ghost power-up length in ticks
 
-// Tile values: 0 empty, 1 wall, 2 brick, 3 range+, 4 bomb+, 5 speed+, 6 steel crate (two hits), 7 gift crate (always drops),
+// Tile values: 0 empty, 1 wall, 2 brick, 3 range+, 4 bomb+, 5 speed+, 8 ghost, 6 steel crate (two hits), 7 gift crate (always drops),
 // 16+ttl flame, 32+ttl flame over a brick (may drop), 48+ttl flame over a gift (drops).
 let ROBOTO: const u8[:] = embed_file("Roboto-Regular.ttf");
-struct Player { x: i64, y: i64, on: u8, alive: u8, bombs: u8, range: u8, speed: u8, wins: u8, bits: u8, held: u8, placed: u8 }
+struct Player { x: i64, y: i64, on: u8, alive: u8, bombs: u8, range: u8, speed: u8, wins: u8, bits: u8, held: u8, placed: u8, ghost: u16 }
 struct Bomb { x: u8, y: u8, t: u8, range: u8, owner: u8 }
 struct State { grid: u8[195], players: Player[4], bombs: Bomb[..16], over: i64, you: u8 }
 
@@ -46,7 +48,15 @@ fn bomb_at(s: State&, tx: i64, ty: i64) -> i64 {
 }
 
 // Does player p's box centered at x y hit a wall, block, or a bomb it is not already standing on?
-fn blocked(s: State&, p: Player&, x: i64, y: i64) -> bool {
+fn blocked(s: State&, i: i64, x: i64, y: i64) -> bool {
+    let p = s.players[i];
+    for j in 4 {
+        let q = s.players[j];
+        guard j != i && q.on != 0 && q.alive != 0 && (q.bits & HOLD) != 0 else { continue; }
+        let into = abs(x - q.x) < 2 * HB && abs(y - q.y) < 2 * HB;
+        let inside = abs(p.x - q.x) < 2 * HB && abs(p.y - q.y) < 2 * HB;
+        if into && !inside { return true; }
+    }
     for ty in (y - HB) / TILE..(y + HB - 1) / TILE + 1 {
         for tx in (x - HB) / TILE..(x + HB - 1) / TILE + 1 {
             let g = s.grid[ty * W + tx];
@@ -84,6 +94,7 @@ fn reset_round(s: State&, r: rng&) {
         s.players[i].speed = 0;
         s.players[i].placed = 0;
         s.players[i].held = 0;
+        s.players[i].ghost = 0;
     }
     s.bombs.resize(0);
     s.over = 0;
@@ -122,27 +133,31 @@ fn step_player(s: State&, i: i64) {
     else if (bits & DOWN) != 0 { dy = sp; }
     else if (bits & LEFT) != 0 { dx = -sp; }
     else if (bits & RIGHT) != 0 { dx = sp; }
+    if (bits & HOLD) != 0 { dx = 0; dy = 0; }
+    if s.players[i].ghost > 0 { s.players[i].ghost -= 1; }
     let x = s.players[i].x;
     let y = s.players[i].y;
-    if !blocked(s, s.players[i], x + dx, y + dy) {
+    if dx == 0 && dy == 0 {
+    } else if !blocked(s, i, x + dx, y + dy) {
         s.players[i].x = x + dx;
         s.players[i].y = y + dy;
     } else if dx != 0 {          // slide around a corner toward the row's center
         let off = (y / TILE) * TILE + TILE / 2 - y;
         let st = max(-sp, min(sp, off));
-        if abs(off) <= 24 && !blocked(s, s.players[i], x, y + st) { s.players[i].y = y + st; }
+        if abs(off) <= 24 && !blocked(s, i, x, y + st) { s.players[i].y = y + st; }
     } else if dy != 0 {
         let off = (x / TILE) * TILE + TILE / 2 - x;
         let st = max(-sp, min(sp, off));
-        if abs(off) <= 24 && !blocked(s, s.players[i], x + st, y) { s.players[i].x = x + st; }
+        if abs(off) <= 24 && !blocked(s, i, x + st, y) { s.players[i].x = x + st; }
     }
     let tx = s.players[i].x / TILE;
     let ty = s.players[i].y / TILE;
     let g = s.grid[ty * W + tx];
-    if g >= 3 && g <= 5 {
+    if (g >= 3 && g <= 5) || g == 8 {
         if g == 3 { s.players[i].range += 1; }
         if g == 4 { s.players[i].bombs += 1; }
         if g == 5 && s.players[i].speed < 3 { s.players[i].speed += 1; }
+        if g == 8 { s.players[i].ghost = GHOST; }
         s.grid[ty * W + tx] = 0;
     }
     let p = s.players[i];
@@ -181,7 +196,10 @@ fn tick(s: State&, r: rng&, n: i64) {
             let g = s.grid[i];
             if g < 16 { continue; }
             if g % 16 > 0 { s.grid[i] = g - 1; }
-            else if g >= 48 || (g >= 32 && r.rand_int(3) == 0) { s.grid[i] = 3 + r.rand_int(3) as u8; }
+            else if g >= 48 || (g >= 32 && r.rand_int(3) == 0) {
+                let k = r.rand_int(5);
+                s.grid[i] = if k == 4 { 8 } else { 3 + k as u8 };
+            }
             else { s.grid[i] = 0; }
         }
     }
@@ -253,7 +271,7 @@ thread_fn client(url: u8[..64]) {
 // ---- sound ------------------------------------------------------------------------------------
 
 struct Sfx { place: audio::Sound, boom: audio::Sound, pickup: audio::Sound, die: audio::Sound, win: audio::Sound, clank: audio::Sound }
-struct Fx { shake: f32, lost: bool }
+struct Fx { shake: f32, lost: bool, dust: float4[..64], last: float2[4] }
 
 // A synthesized effect: a sine sweeping f0 to f1 mixed with low-passed noise, under a decaying envelope.
 fn synth(r: rng&, secs: f64, f0: f64, f1: f64, noise: f64, decay: f64) -> audio::Sound {
@@ -348,7 +366,7 @@ fn hear(prev: State&, s: State&, sfx: Sfx, fx: Fx&) {
         guard a.on != 0 && b.on != 0 else { continue; }
         let vol = if i == s.you { 0.8 } else { 0.4 };
         if a.alive != 0 && b.alive == 0 { audio::play(sfx.die, 0.8, pan(b.x), 1.0, false); }
-        if b.range + b.bombs + b.speed > a.range + a.bombs + a.speed { audio::play(sfx.pickup, vol, pan(b.x), 1.0, false); }
+        if b.range + b.bombs + b.speed > a.range + a.bombs + a.speed || (a.ghost == 0 && b.ghost > 0) { audio::play(sfx.pickup, vol, pan(b.x), 1.0, false); }
         if b.wins > a.wins { audio::play(sfx.win, 0.8, 0.0, 1.0, false); }
     }
 }
@@ -428,7 +446,7 @@ fn draw_gift(c: ui::Context, x: f32, y: f32, t: f32, tm: f32) {
 
 fn draw_power(c: ui::Context, g: u8, x: f32, y0: f32, t: f32, tm: f32) {
     let y = y0 + sin(tm * 4.0 + x) * t * 0.04;
-    let plate = if g == 3 { ui::rgb(200, 60, 40) } else if g == 4 { ui::rgb(70, 70, 84) } else { ui::rgb(30, 150, 205) };
+    let plate = if g == 3 { ui::rgb(200, 60, 40) } else if g == 4 { ui::rgb(70, 70, 84) } else if g == 8 { ui::rgb(120, 80, 190) } else { ui::rgb(30, 150, 205) };
     ui::fill_circle(c, ui::rect(x + t * 0.04, y + t * 0.04, t * 0.92, t * 0.92), ui::rgba(255, 255, 255, 40));
     ui::fill_rect(c, ui::rect(x + t * 0.14, y + t * 0.14, t * 0.72, t * 0.72), t * 0.18, plate);
     ui::stroke_rect(c, ui::rect(x + t * 0.14, y + t * 0.14, t * 0.72, t * 0.72), t * 0.18, 2.0, ui::rgb(255, 255, 255));
@@ -441,6 +459,11 @@ fn draw_power(c: ui::Context, g: u8, x: f32, y0: f32, t: f32, tm: f32) {
         ui::fill_circle(c, ui::rect(x + t * 0.38, y + t * 0.43, t * 0.1, t * 0.1), ui::rgb(255, 255, 255));
         ui::stroke_line(c, x + t * 0.6, y + t * 0.4, x + t * 0.7, y + t * 0.28, 2.0, ui::rgb(230, 200, 140));
         ui::fill_circle(c, ui::rect(x + t * 0.67, y + t * 0.22, t * 0.1, t * 0.1), ui::rgb(255, 210, 60));
+    } else if g == 8 {   // ghost
+        ui::fill_circle(c, ui::rect(x + t * 0.3, y + t * 0.24, t * 0.4, t * 0.4), ui::rgb(240, 240, 255));
+        ui::fill_rect(c, ui::rect(x + t * 0.3, y + t * 0.44, t * 0.4, t * 0.28), 0.0, ui::rgb(240, 240, 255));
+        for k in 3 { ui::fill_circle(c, ui::rect(x + t * (0.3 + 0.1333 * k), y + t * 0.66, t * 0.1333, t * 0.1), ui::rgb(240, 240, 255)); }
+        for e in 2 { ui::fill_circle(c, ui::rect(x + t * (0.38 + 0.15 * e), y + t * 0.4, t * 0.07, t * 0.09), ui::rgb(40, 30, 70)); }
     } else {             // bolt
         ui::fill_triangle(c, x + t * 0.56, y + t * 0.2, x + t * 0.34, y + t * 0.52, x + t * 0.52, y + t * 0.52, ui::rgb(255, 235, 90));
         ui::fill_triangle(c, x + t * 0.48, y + t * 0.46, x + t * 0.68, y + t * 0.46, x + t * 0.44, y + t * 0.8, ui::rgb(255, 235, 90));
@@ -479,6 +502,15 @@ fn draw_player(c: ui::Context, s: State&, i: i64, x: f32, y: f32, t: f32, tm: f3
     else if (bits & LEFT) != 0 { fx = -1.0; fy = 0.0; }
     else if (bits & RIGHT) != 0 { fx = 1.0; fy = 0.0; }
     let walk = if (bits & 15) != 0 { 0.05 * t * sin(tm * 22.0) } else { 0.0 };
+    let gh = s.players[i].ghost;
+    if gh > 0 {          // ghosts are unseen; only their owner sees a faint, flickering outline
+        if i == s.you && (gh > 120 || (gh / 6) % 2 == 0) {
+            ui::stroke_circle(c, ui::rect(x - k * 0.5, y - k * 0.5 + walk, k, k), 2.0, ui::rgba(255, 255, 255, 70));
+            ui::fill_circle(c, ui::rect(x - k * 0.5, y - k * 0.5 + walk, k, k), ui::rgba(255, 255, 255, 18));
+        }
+        return;
+    }
+    if (bits & HOLD) != 0 { ui::stroke_rect(c, ui::rect(x - k * 0.62, y - k * 0.62, k * 1.24, k * 1.24), k * 0.3, 3.0, ui::rgba(255, 255, 255, 190)); }
     ui::fill_circle(c, ui::rect(x - k * 0.5, y + k * 0.3, k, k * 0.4), ui::rgba(0, 0, 0, 110));
     ui::fill_circle(c, ui::rect(x - k * 0.5, y - k * 0.5 + walk, k, k), col(i));
     ui::stroke_circle(c, ui::rect(x - k * 0.5, y - k * 0.5 + walk, k, k), 3.0, ui::rgb(255, 255, 255));
@@ -516,11 +548,16 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
                 else if g == 2 { draw_brick(hud, x, y, t); }
                 else if g == 6 { draw_steel(hud, x, y, t); }
                 else if g == 7 { draw_gift(hud, x, y, t, tm); }
-                else if g >= 3 && g <= 5 { draw_power(hud, g, x, y, t, tm); }
+                else if (g >= 3 && g <= 5) || g == 8 { draw_power(hud, g, x, y, t, tm); }
                 else if g >= 16 { draw_flame(hud, g, x, y, t, tm); }
             }
         }
         for b in s.bombs { draw_bomb(hud, b, ox, oy, t, tm); }
+        for d in fx.dust {
+            let a = 1.0 - d.z / 40.0;
+            let r = t * (0.05 + 0.05 * a);
+            ui::fill_circle(hud, ui::rect(ox + d.x / TILE * t - r, oy + d.y / TILE * t - r - d.z * 0.25, r * 2.0, r * 2.0), ui::rgba(220, 215, 200, (50.0 * a) as i64));
+        }
         for i in 4 {
             if s.players[i].on != 0 && s.players[i].alive != 0 {
                 draw_player(hud, s, i, ox + shown[i].x / TILE * t, oy + shown[i].y / TILE * t, t, tm);
@@ -564,6 +601,7 @@ fn keys() -> u8 {
     if gfx::key_down("Left") || gfx::key_down("A") { b |= LEFT; }
     if gfx::key_down("Right") || gfx::key_down("D") { b |= RIGHT; }
     if gfx::key_down("Space") { b |= BOMB; }
+    if gfx::key_down("Left Shift") || gfx::key_down("Right Shift") { b |= HOLD; }
     return b;
 }
 
@@ -615,7 +653,7 @@ fn main() {
     let big = overlay(72.0);
     let z = float2 { 0.0, 0.0 };
     var shown: float2[4] = [z, z, z, z];
-    var fx = Fx { 0.0, false };
+    var fx = Fx { .. };
     var px = 0;          // client: where this player is predicted to be
     var py = 0;
     var acc = 0.0;
@@ -688,6 +726,16 @@ fn main() {
             let tgt = float2 { s.players[i].x as f32, s.players[i].y as f32 };
             if mode == "join" { shown[i] = if i == s.you { float2 { px as f32, py as f32 } } else { shown[i] + (tgt - shown[i]) * 0.5 }; }
             else { shown[i] = tgt; }
+        }
+        var di = 0;
+        while di < fx.dust.len {
+            fx.dust[di].z += 1.0;
+            if fx.dust[di].z > 40.0 { remove_at(fx.dust, di); } else { di += 1; }
+        }
+        for i in 4 {
+            let moved = abs(shown[i].x - fx.last[i].x) + abs(shown[i].y - fx.last[i].y) > 0.5;
+            if s.players[i].ghost > 0 && moved && fx.dust.len < 64 { fx.dust.push(float4 { shown[i].x, shown[i].y, 0.0, 0.0 }); }
+            fx.last[i] = shown[i];
         }
         draw(hud, big, s, shown, fx, mode);
         gfx::begin_screen(float4 { 0.06, 0.07, 0.1, 1.0 });

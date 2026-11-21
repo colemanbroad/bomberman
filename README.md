@@ -10,9 +10,12 @@ goose build bomberman.goose
 ./bomberman                      # solo
 ```
 
-Arrows/WASD move, Space drops a bomb, M mutes the music, Escape quits. Up to 4 players. Clients predict their own movement and
+Arrows/WASD move, Space drops a bomb, hold Shift to stand your ground (you freeze and others cannot walk through you), M mutes the music, Escape quits. Up to 4 players. Clients predict their own movement and
 the host sends a snapshot every 60 Hz tick.
 
 - `build-portable.sh` (macOS) relinks OpenSSL statically and zips a binary that runs on any Apple Silicon Mac.
 - `windows/` has a build script and notes for Windows (untested).
 - Needs CMake and OpenSSL to build (the WebSocket client's TLS package). `Roboto-Regular.ttf` is Apache 2.0.
+
+Power-ups: flame (range), bomb (extra bomb), bolt (speed), and the purple ghost (10 s): you turn invisible to
+everyone else, leaving only a faint trail of dust while you move. You still see a faint outline of yourself.

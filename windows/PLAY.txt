@@ -2,4 +2,4 @@ Unzip this folder, then in it open a Command Prompt and run:
   bomberman.exe host              (you host; allow it through the firewall)
   bomberman.exe join 192.168.x.x  (join the host's IP)
   bomberman.exe                   (solo)
-Arrows/WASD move, Space bombs, M mutes music, Escape quits.
+Arrows/WASD move, Space bombs, hold Shift to freeze in place and block others, M mutes music, Escape quits.
