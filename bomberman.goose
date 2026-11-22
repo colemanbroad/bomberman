@@ -2706,10 +2706,12 @@ fn main() {
                 ui::layout_row_dynamic(menu, 28.0, 1);
                 ui::label(menu, "Map (changes music & theme):", ui::TEXT_LEFT);
                 ui::layout_row_dynamic(menu, 34.0, 4);
-                if ui::option_label(menu, "Island", s.map == MAP_ISLAND) { s.map = MAP_ISLAND; reset_round(s, r); }
-                if ui::option_label(menu, "Forest", s.map == MAP_FOREST) { s.map = MAP_FOREST; reset_round(s, r); }
-                if ui::option_label(menu, "Mountains", s.map == MAP_MOUNTAINS) { s.map = MAP_MOUNTAINS; reset_round(s, r); }
-                if ui::option_label(menu, "Desert", s.map == MAP_DESERT) { s.map = MAP_DESERT; reset_round(s, r); }
+                let prev_map = s.map;
+                if ui::option_label(menu, "Island", s.map == MAP_ISLAND) { s.map = MAP_ISLAND; }
+                if ui::option_label(menu, "Forest", s.map == MAP_FOREST) { s.map = MAP_FOREST; }
+                if ui::option_label(menu, "Mountains", s.map == MAP_MOUNTAINS) { s.map = MAP_MOUNTAINS; }
+                if ui::option_label(menu, "Desert", s.map == MAP_DESERT) { s.map = MAP_DESERT; }
+                if s.map != prev_map { reset_round(s, r); }
                 ui::layout_row_dynamic(menu, 28.0, 1);
                 var dlbl: u8[>..] = [];
                 format(dlbl, "Power-Up Drop Rate: ", s.drops, "%");
@@ -2794,16 +2796,17 @@ fn main() {
                 let ed = ui::edit_string(menu, ui::EDIT_FIELD | ui::EDIT_SIG_ENTER, my_name, ui::FILTER_ASCII);
                 ui::layout_row_dynamic(menu, 28.0, 1);
                 ui::label(menu, "Pick your Farm Character:", ui::TEXT_LEFT);
-                var changed = false;
+                let prev_kind = my_kind;
                 ui::layout_row_dynamic(menu, 36.0, 2);
-                if ui::option_label(menu, "Goose (Eggs)", my_kind == CHAR_GOOSE) { my_kind = CHAR_GOOSE; changed = true; }
-                if ui::option_label(menu, "Squirrel (Acorns)", my_kind == CHAR_SQUIRREL) { my_kind = CHAR_SQUIRREL; changed = true; }
+                if ui::option_label(menu, "Goose (Eggs)", my_kind == CHAR_GOOSE) { my_kind = CHAR_GOOSE; }
+                if ui::option_label(menu, "Squirrel (Acorns)", my_kind == CHAR_SQUIRREL) { my_kind = CHAR_SQUIRREL; }
                 ui::layout_row_dynamic(menu, 36.0, 2);
-                if ui::option_label(menu, "Baby (Diapers)", my_kind == CHAR_BABY) { my_kind = CHAR_BABY; changed = true; }
-                if ui::option_label(menu, "Cow (Patties)", my_kind == CHAR_COW) { my_kind = CHAR_COW; changed = true; }
+                if ui::option_label(menu, "Baby (Diapers)", my_kind == CHAR_BABY) { my_kind = CHAR_BABY; }
+                if ui::option_label(menu, "Cow (Patties)", my_kind == CHAR_COW) { my_kind = CHAR_COW; }
                 ui::layout_row_dynamic(menu, 36.0, 2);
-                if ui::option_label(menu, "Pig (Bacon)", my_kind == CHAR_PIG) { my_kind = CHAR_PIG; changed = true; }
-                if ui::option_label(menu, "Farmer (Hay Bales)", my_kind == CHAR_FARMER) { my_kind = CHAR_FARMER; changed = true; }
+                if ui::option_label(menu, "Pig (Bacon)", my_kind == CHAR_PIG) { my_kind = CHAR_PIG; }
+                if ui::option_label(menu, "Farmer (Hay Bales)", my_kind == CHAR_FARMER) { my_kind = CHAR_FARMER; }
+                let changed = my_kind != prev_kind;
                 ui::layout_row_dynamic(menu, 42.0, 1);
                 let done = ui::button_label(menu, "Play!") || (ed & ui::EDIT_COMMITTED) != 0;
                 if mode == "join" {
