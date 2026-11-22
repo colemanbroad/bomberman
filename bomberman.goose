@@ -1231,7 +1231,7 @@ fn marker(c: ui::Context, i: i64, x: f32, y: f32, r: f32) {
 }
 
 fn text(c: ui::Context, x: f32, y: f32, str: const u8[:], color: ui::Color) {
-    ui::draw_text(c, ui::rect(x, y, 600.0, 80.0), str, ui::font(c), ui::Color { 0, 0, 0, 0 }, color);
+    ui::draw_text(c, ui::rect(x, y, 2000.0, 200.0), str, ui::font(c), ui::Color { 0, 0, 0, 0 }, color);
 }
 
 fn map_clear_color(m: u8) -> float4 {
@@ -1918,8 +1918,8 @@ fn draw_player(c: ui::Context, s: State&, i: i64, x: f32, y: f32, t: f32, tm: f3
     marker(c, i, x, y - k * 0.78 + walk, t * 0.13);
     if s.players[i].name.len > 0 {
         let nw = ui::text_width(ui::font(c), s.players[i].name[..]);
-        ui::fill_rect(c, ui::rect(x - nw * 0.5 - 4.0, y + k * 0.44, nw + 8.0, 20.0), 4.0, ui::rgba(10, 12, 20, 165));
-        text(c, x - nw * 0.5, y + k * 0.43, s.players[i].name[..], ui::rgb(245, 245, 250));
+        ui::fill_rect(c, ui::rect(x - nw * 0.5 - 6.0, y + k * 0.44, nw + 12.0, 28.0), 5.0, ui::rgba(10, 12, 20, 175));
+        text(c, x - nw * 0.5, y + k * 0.44, s.players[i].name[..], ui::rgb(245, 245, 250));
     }
     if i == s.you {
         let bob = 0.06 * t * sin(tm * 6.0);
@@ -1928,9 +1928,7 @@ fn draw_player(c: ui::Context, s: State&, i: i64, x: f32, y: f32, t: f32, tm: f3
 }
 
 // Every 5 wins: spotlight zoom-in where the winner dances right in everyone's faces!
-fn draw_dance(c: ui::Context, s: State&, who: i64, size: int2, tm: f32) {
-    let sw = size.x as f32;
-    let sh = size.y as f32;
+fn draw_dance(c: ui::Context, s: State&, who: i64, sw: f32, sh: f32, tm: f32) {
     let cx = sw * 0.5;
     let cy = sh * 0.54;
     let k = min(sw, sh) * 0.34;
@@ -1987,8 +1985,8 @@ fn draw_dance(c: ui::Context, s: State&, who: i64, size: int2, tm: f32) {
     if s.players[who].streak >= 2 { format(sub, "VICTORY DANCE!  ", s.players[who].streak, " WIN STREAK!"); }
     else { sub.append("VICTORY DANCE!"); }
     let sw2 = ui::text_width(ui::font(c), sub);
-    ui::fill_rect(c, ui::rect((sw - sw2) * 0.5 - 16.0, sh - 68.0, sw2 + 32.0, 34.0), 8.0, ui::rgba(15, 18, 30, 210));
-    text(c, (sw - sw2) * 0.5, sh - 63.0, sub, ui::rgb(255, 225, 90));
+    ui::fill_rect(c, ui::rect((sw - sw2) * 0.5 - 18.0, sh - 74.0, sw2 + 36.0, 44.0), 8.0, ui::rgba(15, 18, 30, 215));
+    text(c, (sw - sw2) * 0.5, sh - 67.0, sub, ui::rgb(255, 225, 90));
 }
 
 // Swirling glowing portal (idx 0 = Cyan, idx 1 = Orange).
@@ -2037,8 +2035,8 @@ fn draw_black_sheep(c: ui::Context, s: State&, i: i64, x: f32, y: f32, t: f32, t
     marker(c, i, x, y - k * 0.72 + bob, t * 0.12);
     if s.players[i].name.len > 0 {
         let nw = ui::text_width(ui::font(c), s.players[i].name[..]);
-        ui::fill_rect(c, ui::rect(x - nw * 0.5 - 4.0, y + k * 0.44, nw + 8.0, 20.0), 4.0, ui::rgba(10, 12, 20, 165));
-        text(c, x - nw * 0.5, y + k * 0.43, s.players[i].name[..], ui::rgb(210, 210, 220));
+        ui::fill_rect(c, ui::rect(x - nw * 0.5 - 6.0, y + k * 0.44, nw + 12.0, 28.0), 5.0, ui::rgba(10, 12, 20, 175));
+        text(c, x - nw * 0.5, y + k * 0.44, s.players[i].name[..], ui::rgb(210, 210, 220));
     }
 }
 
@@ -2062,8 +2060,8 @@ fn draw_fog_ghost(c: ui::Context, s: State&, i: i64, x: f32, y: f32, t: f32, tm:
     marker(c, i, x, y - k * 0.74 + bob, t * 0.11);
     if s.players[i].name.len > 0 {
         let nw = ui::text_width(ui::font(c), s.players[i].name[..]);
-        ui::fill_rect(c, ui::rect(x - nw * 0.5 - 4.0, y + k * 0.46, nw + 8.0, 20.0), 4.0, ui::rgba(10, 12, 20, 145));
-        text(c, x - nw * 0.5, y + k * 0.45, s.players[i].name[..], ui::rgb(190, 225, 255));
+        ui::fill_rect(c, ui::rect(x - nw * 0.5 - 6.0, y + k * 0.46, nw + 12.0, 28.0), 5.0, ui::rgba(10, 12, 20, 155));
+        text(c, x - nw * 0.5, y + k * 0.46, s.players[i].name[..], ui::rgb(190, 225, 255));
     }
 }
 
@@ -2079,15 +2077,17 @@ fn draw_fog(c: ui::Context, g: u8, x: f32, y: f32, t: f32, tm: f32, viewer_ghost
     ui::fill_circle(c, ui::rect(x + t * 0.72 - r * 0.55 + drift * 0.6, y + t * 0.68 - r * 0.55, r * 1.1, r * 1.1), ui::rgba(164, 178, 198, a));
 }
 
-fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&, mode: const u8[:]) {
+fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&, mode: const u8[:], sc: f32) {
     let size = gfx::screen_size();
+    let vw = (size.x as f32) / sc;
+    let vh = (size.y as f32) / sc;
     let tm = gfx::time() as f32;
-    let top: f32 = 46.0;
-    let t = min((size.x as f32) / W, (size.y as f32 - top) / H);
-    let ox = (size.x as f32 - t * W) / 2.0 + fx.shake * sin(tm * 90.0);
+    let top: f32 = 58.0;
+    let t = min(vw / W, (vh - top) / H);
+    let ox = (vw - t * W) / 2.0 + fx.shake * sin(tm * 90.0);
     let oy = top + fx.shake * cos(tm * 77.0);
     fx.shake *= 0.88;
-    if ui::begin(hud, "G", ui::rect(0, 0, size.x, size.y), ui::WINDOW_NO_INPUT | ui::WINDOW_NO_SCROLLBAR) {
+    if ui::begin(hud, "G", ui::rect(0, 0, vw, vh), ui::WINDOW_NO_INPUT | ui::WINDOW_NO_SCROLLBAR) {
         ui::fill_rect(hud, ui::rect(ox - 8.0, oy - 8.0, t * W + 16.0, t * H + 16.0), 10.0, map_border_color(s.map));
         for ty in H {
             for tx in W {
@@ -2160,11 +2160,11 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
         }
         if st.len > 0 {
             let sw0 = ui::text_width(ui::font(hud), st);
-            ui::fill_rect(hud, ui::rect((size.x as f32 - sw0) * 0.5 - 12.0, size.y as f32 - 30.0, sw0 + 24.0, 26.0), 6.0, ui::rgba(10, 12, 20, 195));
-            text(hud, (size.x as f32 - sw0) * 0.5, size.y as f32 - 28.0, st, ui::rgb(255, 225, 110));
+            ui::fill_rect(hud, ui::rect((vw - sw0) * 0.5 - 14.0, vh - 40.0, sw0 + 28.0, 34.0), 7.0, ui::rgba(10, 12, 20, 200));
+            text(hud, (vw - sw0) * 0.5, vh - 37.0, st, ui::rgb(255, 225, 110));
         }
-        ui::fill_rect(hud, ui::rect(0, 0, size.x, top - 10.0), 0.0, ui::rgba(10, 12, 20, 200));
-        var x: f32 = 16.0;
+        ui::fill_rect(hud, ui::rect(0, 0, vw, top - 8.0), 0.0, ui::rgba(10, 12, 20, 205));
+        var x: f32 = 14.0;
         for i in 4 {
             guard s.players[i].on != 0 else { continue; }
             var nm: u8[>..] = [];
@@ -2173,22 +2173,22 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
             if s.players[i].streak >= 2 { format(line, nm[..], " ", s.players[i].wins, " [", s.players[i].streak, "x]"); }
             else { format(line, nm[..], " ", s.players[i].wins); }
             let lw = ui::text_width(ui::font(hud), line);
-            let boxw = max(92.0, lw + 34.0);
-            marker(hud, i, x + 10.0, 17.0, 8.0);
-            text(hud, x + 24.0, 4.0, line, if s.players[i].alive != 0 { ui::rgb(240, 240, 245) } else { ui::rgb(120, 124, 140) });
-            if i == s.you && mode != "solo" { ui::stroke_rect(hud, ui::rect(x - 6.0, 2.0, boxw, 28.0), 6.0, 2.0, ui::rgb(255, 255, 255)); }
+            let boxw = max(108.0, lw + 38.0);
+            marker(hud, i, x + 12.0, 24.0, 10.0);
+            text(hud, x + 28.0, 10.0, line, if s.players[i].alive != 0 { ui::rgb(240, 240, 245) } else { ui::rgb(120, 124, 140) });
+            if i == s.you && mode != "solo" { ui::stroke_rect(hud, ui::rect(x - 6.0, 4.0, boxw, 40.0), 7.0, 2.5, ui::rgb(255, 255, 255)); }
             x += boxw + 12.0;
         }
         var tag: u8[>..] = [];
         if mode == "solo" { tag.append("SOLO"); } else if mode == "host" { tag.append("HOST"); } else { format(tag, "CLIENT P", s.you + 1); if mode == "udp" { tag.append(" UDP"); } }
         if fx.lost { tag.append("  DISCONNECTED"); }
-        text(hud, size.x - 16.0 - ui::text_width(ui::font(hud), tag), 4.0, tag, ui::rgb(150, 156, 176));
+        text(hud, vw - 14.0 - ui::text_width(ui::font(hud), tag), 10.0, tag, ui::rgb(160, 168, 190));
         if s.over > 0 && s.dance_who < 4 {
-            draw_dance(hud, s, s.dance_who as i64, size, tm);
+            draw_dance(hud, s, s.dance_who as i64, vw, vh, tm);
         }
     }
     ui::end(hud);
-    if ui::begin(big, "B", ui::rect(0, 0, size.x, size.y), ui::WINDOW_NO_INPUT | ui::WINDOW_NO_SCROLLBAR) && s.over > 0 {
+    if ui::begin(big, "B", ui::rect(0, 0, vw, vh), ui::WINDOW_NO_INPUT | ui::WINDOW_NO_SCROLLBAR) && s.over > 0 {
         if s.dance_who < 4 {
             let who = s.dance_who as i64;
             var nm: u8[>..] = [];
@@ -2196,7 +2196,7 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
             var title: u8[>..] = [];
             format(title, nm[..], " - ", s.players[who].wins, " WINS!");
             let tw = ui::text_width(ui::font(big), title);
-            text(big, (size.x as f32 - tw) * 0.5, 48.0, title, col(who));
+            text(big, (vw - tw) * 0.5, 42.0, title, col(who));
         } else {
             var who = -1;
             for i in 4 { if s.players[i].on != 0 && s.players[i].alive != 0 { who = i; } }
@@ -2208,8 +2208,8 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
                 else { format(msg, nm[..], " WINS!"); }
             } else { msg.append("DRAW"); }
             let w = ui::text_width(ui::font(big), msg);
-            ui::fill_rect(big, ui::rect(0, size.y / 2.0 - 60.0, size.x, 110.0), 0.0, ui::rgba(10, 12, 20, 190));
-            text(big, (size.x as f32 - w) / 2.0, size.y / 2.0 - 52.0, msg, if who >= 0 { col(who) } else { ui::rgb(230, 230, 235) });
+            ui::fill_rect(big, ui::rect(0, vh / 2.0 - 75.0, vw, 145.0), 0.0, ui::rgba(10, 12, 20, 195));
+            text(big, (vw - w) / 2.0, vh / 2.0 - 60.0, msg, if who >= 0 { col(who) } else { ui::rgb(230, 230, 235) });
         }
     }
     ui::end(big);
@@ -2368,10 +2368,18 @@ fn main() {
     var last_map = s.map;
     var tune = if own { audio::play(audio::create_sound(pcm, info[0], info[1]), mvol, 0.0, 1.0, true) } else { audio::play(songs[track], mvol, 0.0, 1.0, true) };
     var muted = false;
-    let hud = overlay(20.0);
-    let big = overlay(72.0);
-    let panel = overlay(18.0);
-    let menu = ui::create_from_memory(ROBOTO, 17.0);
+    let hud = overlay(28.0);
+    let big = overlay(104.0);
+    let panel = overlay(24.0);
+    let menu = ui::create_from_memory(ROBOTO, 24.0);
+    let init_sz = gfx::screen_size();
+    var sc: f32 = max(1.0, min(3.5, min((init_sz.x as f32) / 960.0, (init_sz.y as f32) / 720.0)));
+    if sc != 1.0 {
+        ui::set_scale(hud, sc);
+        ui::set_scale(big, sc);
+        ui::set_scale(panel, sc);
+        ui::set_scale(menu, sc);
+    }
     var menu_open = frames < 0 && my_name.len == 0;
     var host_open = false;
     let z = float2 { 0.0, 0.0 };
@@ -2673,46 +2681,50 @@ fn main() {
                 tune = audio::play(songs[track], if muted { 0.0 } else { mvol }, 0.0, 1.0, true);
             }
         }
-        draw(hud, big, s, shown, fx, if use_udp && udp_rx_age < 45 { "udp" } else { mode });
+        draw(hud, big, s, shown, fx, if use_udp && udp_rx_age < 45 { "udp" } else { mode }, sc);
         let sz = gfx::screen_size();
-        if ui::begin(panel, "Bar", ui::rect(sz.x as f32 - 390.0, 4.0, 240.0, 28.0), ui::WINDOW_NO_SCROLLBAR) {
+        let vw = (sz.x as f32) / sc;
+        let vh = (sz.y as f32) / sc;
+        let bar_w: f32 = if mode != "join" { 276.0 } else { 116.0 };
+        let bar_x = vw - bar_w - (if mode == "join" { 188.0 } else { 108.0 });
+        if ui::begin(panel, "Bar", ui::rect(bar_x, 5.0, bar_w, 40.0), ui::WINDOW_NO_SCROLLBAR) {
             if mode != "join" {
-                let rat: f32[2] = [0.42, 0.58];
-                ui::layout_row(panel, ui::DYNAMIC, 22.0, rat);
+                let rat: f32[2] = [0.40, 0.60];
+                ui::layout_row(panel, ui::DYNAMIC, 32.0, rat);
                 if ui::button_label(panel, "Profile") { menu_open = !menu_open; if menu_open { host_open = false; } }
                 if ui::button_label(panel, "Host Settings") { host_open = !host_open; if host_open { menu_open = false; } }
             } else {
-                ui::layout_row_dynamic(panel, 22.0, 1);
+                ui::layout_row_dynamic(panel, 32.0, 1);
                 if ui::button_label(panel, "Profile") { menu_open = !menu_open; }
             }
         }
         ui::end(panel);
         if host_open && mode != "join" {
-            let hw: f32 = 490.0;
-            let hh: f32 = 520.0;
-            if ui::begin(menu, "Host Settings", ui::rect((sz.x as f32 - hw) * 0.5, (sz.y as f32 - hh) * 0.5, hw, hh), ui::WINDOW_BORDER | ui::WINDOW_TITLE | ui::WINDOW_NO_SCROLLBAR) {
-                ui::layout_row_dynamic(menu, 22.0, 1);
+            let hw: f32 = min(640.0, vw - 24.0);
+            let hh: f32 = min(660.0, vh - 24.0);
+            if ui::begin(menu, "Host Settings", ui::rect((vw - hw) * 0.5, (vh - hh) * 0.5, hw, hh), ui::WINDOW_BORDER | ui::WINDOW_TITLE) {
+                ui::layout_row_dynamic(menu, 28.0, 1);
                 ui::label(menu, "Map (changes music & theme):", ui::TEXT_LEFT);
-                ui::layout_row_dynamic(menu, 26.0, 4);
+                ui::layout_row_dynamic(menu, 34.0, 4);
                 if ui::option_label(menu, "Island", s.map == MAP_ISLAND) { s.map = MAP_ISLAND; reset_round(s, r); }
                 if ui::option_label(menu, "Forest", s.map == MAP_FOREST) { s.map = MAP_FOREST; reset_round(s, r); }
                 if ui::option_label(menu, "Mountains", s.map == MAP_MOUNTAINS) { s.map = MAP_MOUNTAINS; reset_round(s, r); }
                 if ui::option_label(menu, "Desert", s.map == MAP_DESERT) { s.map = MAP_DESERT; reset_round(s, r); }
-                ui::layout_row_dynamic(menu, 22.0, 1);
+                ui::layout_row_dynamic(menu, 28.0, 1);
                 var dlbl: u8[>..] = [];
                 format(dlbl, "Power-Up Drop Rate: ", s.drops, "%");
                 ui::label(menu, dlbl, ui::TEXT_LEFT);
-                ui::layout_row_dynamic(menu, 20.0, 1);
+                ui::layout_row_dynamic(menu, 26.0, 1);
                 s.drops = ui::slide_int(menu, 0, s.drops as i64, 100, 1) as u8;
-                ui::layout_row_dynamic(menu, 22.0, 1);
+                ui::layout_row_dynamic(menu, 28.0, 1);
                 var rlbl: u8[>..] = [];
                 if s.regrow == 0 { rlbl.append("Wall Regrowth when Empty: OFF"); }
                 else { format(rlbl, "Wall Regrowth when Empty: ", s.regrow, "%"); }
                 ui::label(menu, rlbl, ui::TEXT_LEFT);
-                ui::layout_row_dynamic(menu, 20.0, 1);
+                ui::layout_row_dynamic(menu, 26.0, 1);
                 s.regrow = ui::slide_int(menu, 0, s.regrow as i64, 100, 5) as u8;
-                let prat: f32[4] = [0.40, 0.20, 0.22, 0.18];
-                ui::layout_row(menu, ui::DYNAMIC, 24.0, prat);
+                let prat: f32[4] = [0.40, 0.18, 0.24, 0.18];
+                ui::layout_row(menu, ui::DYNAMIC, 34.0, prat);
                 ui::label(menu, "Enabled Power-Ups:", ui::TEXT_LEFT);
                 if ui::button_label(menu, "All") { s.power_mask = PWR_ALL; }
                 if ui::button_label(menu, "Classic") { s.power_mask = PWR_CLASSIC; }
@@ -2728,22 +2740,22 @@ fn main() {
                 var p8 = (s.power_mask & PWR_DRUNK) != 0;
                 var p9 = (s.power_mask & PWR_BAD) != 0;
                 var p10 = (s.power_mask & PWR_UNKICK) != 0;
-                ui::layout_row_dynamic(menu, 23.0, 2);
+                ui::layout_row_dynamic(menu, 30.0, 2);
                 ui::checkbox_label(menu, "Flame (Range+)", p0);
                 ui::checkbox_label(menu, "Extra Bomb", p1);
-                ui::layout_row_dynamic(menu, 23.0, 2);
+                ui::layout_row_dynamic(menu, 30.0, 2);
                 ui::checkbox_label(menu, "Speed Bolt", p2);
                 ui::checkbox_label(menu, "Ghost (Invisible)", p3);
-                ui::layout_row_dynamic(menu, 23.0, 2);
+                ui::layout_row_dynamic(menu, 30.0, 2);
                 ui::checkbox_label(menu, "Kick Boot", p4);
                 ui::checkbox_label(menu, "Heat-Seeker Missile", p5);
-                ui::layout_row_dynamic(menu, 23.0, 2);
+                ui::layout_row_dynamic(menu, 30.0, 2);
                 ui::checkbox_label(menu, "Napalm Fire Trail", p6);
                 ui::checkbox_label(menu, "Proximity Mines", p7);
-                ui::layout_row_dynamic(menu, 23.0, 2);
+                ui::layout_row_dynamic(menu, 30.0, 2);
                 ui::checkbox_label(menu, "Drunk (All + Jitter)", p8);
                 ui::checkbox_label(menu, "Curse (Slow + Range)", p9);
-                ui::layout_row_dynamic(menu, 23.0, 2);
+                ui::layout_row_dynamic(menu, 30.0, 2);
                 ui::checkbox_label(menu, "Unkickable Bombs", p10);
                 var p_on = s.portals_on != 0;
                 if ui::checkbox_label(menu, "Portals Enabled", p_on) {
@@ -2766,33 +2778,33 @@ fn main() {
                 if p9 { nm |= PWR_BAD; }
                 if p10 { nm |= PWR_UNKICK; }
                 s.power_mask = nm;
-                ui::layout_row_dynamic(menu, 30.0, 2);
+                ui::layout_row_dynamic(menu, 38.0, 2);
                 if ui::button_label(menu, "New Round") { reset_round(s, r); host_open = false; }
                 if ui::button_label(menu, "Close") { host_open = false; }
             }
             ui::end(menu);
         }
         if menu_open {
-            let mw: f32 = 400.0;
-            let mh: f32 = 285.0;
-            if ui::begin(menu, "Player Setup", ui::rect((sz.x as f32 - mw) * 0.5, (sz.y as f32 - mh) * 0.5, mw, mh), ui::WINDOW_BORDER | ui::WINDOW_TITLE | ui::WINDOW_NO_SCROLLBAR) {
-                ui::layout_row_dynamic(menu, 22.0, 1);
+            let mw: f32 = min(560.0, vw - 24.0);
+            let mh: f32 = min(390.0, vh - 24.0);
+            if ui::begin(menu, "Player Setup", ui::rect((vw - mw) * 0.5, (vh - mh) * 0.5, mw, mh), ui::WINDOW_BORDER | ui::WINDOW_TITLE | ui::WINDOW_NO_SCROLLBAR) {
+                ui::layout_row_dynamic(menu, 28.0, 1);
                 ui::label(menu, "Your Name (max 12 chars):", ui::TEXT_LEFT);
-                ui::layout_row_dynamic(menu, 30.0, 1);
+                ui::layout_row_dynamic(menu, 40.0, 1);
                 let ed = ui::edit_string(menu, ui::EDIT_FIELD | ui::EDIT_SIG_ENTER, my_name, ui::FILTER_ASCII);
-                ui::layout_row_dynamic(menu, 22.0, 1);
+                ui::layout_row_dynamic(menu, 28.0, 1);
                 ui::label(menu, "Pick your Farm Character:", ui::TEXT_LEFT);
                 var changed = false;
-                ui::layout_row_dynamic(menu, 28.0, 2);
+                ui::layout_row_dynamic(menu, 36.0, 2);
                 if ui::option_label(menu, "Goose (Eggs)", my_kind == CHAR_GOOSE) { my_kind = CHAR_GOOSE; changed = true; }
                 if ui::option_label(menu, "Squirrel (Acorns)", my_kind == CHAR_SQUIRREL) { my_kind = CHAR_SQUIRREL; changed = true; }
-                ui::layout_row_dynamic(menu, 28.0, 2);
+                ui::layout_row_dynamic(menu, 36.0, 2);
                 if ui::option_label(menu, "Baby (Diapers)", my_kind == CHAR_BABY) { my_kind = CHAR_BABY; changed = true; }
                 if ui::option_label(menu, "Cow (Patties)", my_kind == CHAR_COW) { my_kind = CHAR_COW; changed = true; }
-                ui::layout_row_dynamic(menu, 28.0, 2);
+                ui::layout_row_dynamic(menu, 36.0, 2);
                 if ui::option_label(menu, "Pig (Bacon)", my_kind == CHAR_PIG) { my_kind = CHAR_PIG; changed = true; }
                 if ui::option_label(menu, "Farmer (Hay Bales)", my_kind == CHAR_FARMER) { my_kind = CHAR_FARMER; changed = true; }
-                ui::layout_row_dynamic(menu, 32.0, 1);
+                ui::layout_row_dynamic(menu, 42.0, 1);
                 let done = ui::button_label(menu, "Play!") || (ed & ui::EDIT_COMMITTED) != 0;
                 if mode == "join" {
                     if changed || (ed & ui::EDIT_ACTIVE) != 0 || done { qput(Profile { my_kind, my_name }); }
@@ -2810,6 +2822,15 @@ fn main() {
         ui::render(big);
         ui::render(panel);
         ui::render(menu);
+        let nsz = gfx::screen_size();
+        let want_sc = max(1.0, min(3.5, min((nsz.x as f32) / 960.0, (nsz.y as f32) / 720.0)));
+        if abs(want_sc - sc) > 0.05 {
+            sc = want_sc;
+            ui::set_scale(hud, sc);
+            ui::set_scale(big, sc);
+            ui::set_scale(panel, sc);
+            ui::set_scale(menu, sc);
+        }
         frame += 1;
     }
     for i in 4 { if s.players[i].on != 0 { print("player ", i, " at ", s.players[i].x / TILE, ",", s.players[i].y / TILE, " alive ", s.players[i].alive, " wins ", s.players[i].wins, " streak ", s.players[i].streak); } }
