@@ -30,20 +30,34 @@ jobs:
           }
           $d = (Get-ChildItem goosekit -Recurse -Filter goose.exe | Select-Object -First 1).DirectoryName
           echo $d >> $env:GITHUB_PATH
-      - name: Cache OpenSSL
+      - name: Locate OpenSSL
+        id: openssl
+        shell: pwsh
+        run: |
+          $pre = "C:\Program Files\OpenSSL"
+          if ((Test-Path "$pre\include\openssl\ssl.h") -and (Get-ChildItem "$pre\bin\libssl*.dll" -ErrorAction SilentlyContinue)) {
+            echo "Using pre-installed OpenSSL at $pre"
+            echo "OPENSSL_ROOT_DIR=$pre" >> $env:GITHUB_ENV
+            echo "found=true" >> $env:GITHUB_OUTPUT
+          } else {
+            echo "Pre-installed OpenSSL not found; falling back to vcpkg"
+            echo "OPENSSL_ROOT_DIR=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows" >> $env:GITHUB_ENV
+            echo "found=false" >> $env:GITHUB_OUTPUT
+          }
+      - name: Cache OpenSSL (vcpkg fallback)
         id: cache-openssl
+        if: steps.openssl.outputs.found != 'true'
         uses: actions/cache@v4
         with:
           path: ${{ env.VCPKG_INSTALLATION_ROOT }}\installed\x64-windows
           key: vcpkg-openssl-x64-windows-v1
-      - name: Install OpenSSL
-        if: steps.cache-openssl.outputs.cache-hit != 'true'
+      - name: Install OpenSSL (vcpkg fallback)
+        if: steps.openssl.outputs.found != 'true' && steps.cache-openssl.outputs.cache-hit != 'true'
         shell: cmd
         run: '"%VCPKG_INSTALLATION_ROOT%\vcpkg.exe" install openssl:x64-windows'
       - name: Build
         shell: cmd
         run: |
-          set OPENSSL_ROOT_DIR=%VCPKG_INSTALLATION_ROOT%\installed\x64-windows
           set VCPKG_ROOT=%VCPKG_INSTALLATION_ROOT%
           call windows\build-windows.bat
       - name: Package
