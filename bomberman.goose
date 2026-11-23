@@ -1231,12 +1231,23 @@ fn hear(prev: State&, s: State&, sfx: Sfx, fx: Fx&) {
         }
     }
     guard prev.over == 0 && s.over == 0 else { return; }
+    let dt = s.tick - prev.tick;
     for i in s.bombs.len {
-        if bomb_at(prev, s.bombs[i].x, s.bombs[i].y) < 0 { audio::play(sfx.place, 0.6, pan(s.bombs[i].x * TILE), 1.0, false); }
+        let b = s.bombs[i];
+        var existed = false;
+        for j in prev.bombs.len {
+            if prev.bombs[j].owner == b.owner && b.t + dt == prev.bombs[j].t { existed = true; }
+        }
+        if !existed { audio::play(sfx.place, 0.6, pan(b.x * TILE), 1.0, false); }
     }
     for i in prev.bombs.len {
-        if bomb_at(s, prev.bombs[i].x, prev.bombs[i].y) < 0 {
-            audio::play(sfx.boom, 0.9, pan(prev.bombs[i].x * TILE), 1.0, false);
+        let b = prev.bombs[i];
+        var still = false;
+        for j in s.bombs.len {
+            if s.bombs[j].owner == b.owner && s.bombs[j].t + dt == b.t { still = true; }
+        }
+        if dt > 0 && !still {
+            audio::play(sfx.boom, 0.9, pan(b.x * TILE), 1.0, false);
             fx.shake = 9.0;
         }
     }
