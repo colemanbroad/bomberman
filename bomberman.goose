@@ -42,6 +42,7 @@ enum Dir { None, Up, Down, Left, Right }
 enum Life { Off, Alive, BlackSheep, FogGhost }
 enum GameMode { Lobby, Solo, Host, Join }
 enum HostNet { Lan, Upnp, Playit }
+enum MatchMode { FreeForAll, Teams2v2, Prey, Predator }
 
 fn is_dead(l: Life) -> bool { l == Life.BlackSheep || l == Life.FogGhost }
 
@@ -192,8 +193,8 @@ struct Missile { x: i32, y: i32, active: u8, dir: Dir, portal_cd: u8, t: u16 }
 struct Fireball { x: i32, y: i32, dir: Dir, owner: u8, portal_cd: u8, life: u8 }
 // A sheep wanders at random and blocks the way like a movable block. dir: None when grazing; on_fire > 0: blazing & lethal!
 struct Sheep { x: i64, y: i64, alive: u8, dir: Dir, t: u8, portal_cd: u8, on_fire: u16, facing_left: u8 }
-// fences: 2 bits per tile packed into 49 bytes (bit 0 = right edge, bit 1 = bottom edge); permanent boundary barriers.
-struct State { grid: u8[195], fences: u8[49], players: Player[4], bombs: Bomb[..16], mines: Mine[..8], missiles: Missile[4], fireballs: Fireball[..8], sheep: Sheep[2], drops: u8, regrow: u8, map: Map, portals_on: u8, portals: u8[4], power_mask: u32, fuse_ticks: u16, fuse_rand: u8, fire_ticks: u8, fire_rand: u8, fire_range: u8, range_rand: u8, day_night_on: u8, day_phase: u16, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
+// fences: 2 bits per tile packed into 49 bytes; flame_owner: 4 bits per tile packed into 98 bytes (0..3 player, 4 sheep, 15 none).
+struct State { grid: u8[195], fences: u8[49], flame_owner: u8[98], players: Player[4], bombs: Bomb[..16], mines: Mine[..8], missiles: Missile[4], fireballs: Fireball[..8], sheep: Sheep[2], drops: u8, regrow: u8, map: Map, portals_on: u8, portals: u8[4], power_mask: u32, fuse_ticks: u16, fuse_rand: u8, fire_ticks: u8, fire_rand: u8, fire_range: u8, range_rand: u8, day_night_on: u8, day_phase: u16, match_mode: MatchMode, friendly_fire: u8, vip_slot: u8, round_timer: u16, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
 
 // UDP (udp.c): inputs and snapshots fly as datagrams when a client joins with `udp`; the WebSocket stays up for
 // joining, leaving and a slow heartbeat. Each snapshot carries its tick, so stale or reordered ones are dropped.
@@ -252,6 +253,22 @@ fn portal_dest(s: State&, tx: i64, ty: i64) -> int2 {
 }
 
 fn hits(ax: i64, ay: i64, bx: i64, by: i64) -> bool { return abs(ax - bx) < 2 * HB && abs(ay - by) < 2 * HB; }
+
+fn team_of(slot: i64) -> i64 { slot % 2 }
+
+fn fowner_get(s: State&, idx: i64) -> i64 {
+    if idx < 0 || idx >= W * H { return 15; }
+    let b = s.flame_owner[idx / 2];
+    return if (idx & 1) == 0 { (b & 15) as i64 } else { ((b >> 4) & 15) as i64 };
+}
+
+fn fowner_set(s: State&, idx: i64, who: i64) {
+    if idx < 0 || idx >= W * H { return; }
+    let v = (who & 15) as u8;
+    let bi = idx / 2;
+    if (idx & 1) == 0 { s.flame_owner[bi] = (s.flame_owner[bi] & 240) | v; }
+    else { s.flame_owner[bi] = (s.flame_owner[bi] & 15) | (v << 4); }
+}
 
 fn fence_get(s: State&, tx: i64, ty: i64, bit: i64) -> bool {
     if tx < 0 || tx >= W || ty < 0 || ty >= H { return false; }
@@ -351,6 +368,7 @@ fn sheep_blocked(s: State&, k: i64, x: i64, y: i64) -> bool {
 
 fn reset_round(s: State&, r: rng&) {
     for fi in 49 { s.fences[fi] = 0; }
+    for fi in 98 { s.flame_owner[fi] = 255; }
     for ty in H {
         for tx in W {
             var g: u8 = 0;
@@ -439,15 +457,34 @@ fn reset_round(s: State&, r: rng&) {
     s.day_phase = 0;
     s.over = 0;
     s.dance_who = 255;
+    // Rotate VIP (Prey or Predator) across active players each round.
+    var next_vip = (s.vip_slot as i64 + 1) % 4;
+    for tries in 4 {
+        let cand = (next_vip + tries) % 4;
+        if s.players[cand].life != Life.Off { s.vip_slot = cand as u8; break; }
+    }
+    s.round_timer = if s.match_mode == MatchMode.Prey { 3600 } else { 0 };
+    if s.match_mode == MatchMode.Prey {
+        let vp = s.vip_slot as i64;
+        if s.players[vp].life == Life.Alive { s.players[vp].speed = 1; }
+    } else if s.match_mode == MatchMode.Predator {
+        let vp = s.vip_slot as i64;
+        if s.players[vp].life == Life.Alive {
+            s.players[vp].speed = 2;
+            s.players[vp].bombs = 2;
+            s.players[vp].range = max(3, s.fire_range as i64) as u8;
+        }
+    }
 }
 
-fn flame(s: State&, i: i64, lvl: i64) {
+fn flame(s: State&, i: i64, lvl: i64, owner: i64) {
     let g = s.grid[i];
     let lv = max(1, min(15, lvl)) as u8;
     s.grid[i] = if g == 6 { 2 } else if g == 7 || (g >= 48 && g < 64) { 48 + lv } else if g == 2 || (g >= 32 && g < 48) { 32 + lv } else { 16 + lv };
+    fowner_set(s, i, owner);
 }
 
-fn explode_arm(s: State&, bx: i64, by: i64, dx: i64, dy: i64, rng: i64, fire_lvl: i64) {
+fn explode_arm(s: State&, bx: i64, by: i64, dx: i64, dy: i64, rng: i64, fire_lvl: i64, owner: i64) {
     for k in 1..rng + 1 {
         let tx = bx + dx * k;
         let ty = by + dy * k;
@@ -455,33 +492,34 @@ fn explode_arm(s: State&, bx: i64, by: i64, dx: i64, dy: i64, rng: i64, fire_lvl
         let g = s.grid[ty * W + tx];
         if g == 1 { break; }
         if g == TILE_GRATE { continue; } // semi-permeable: flames pass straight through
-        flame(s, ty * W + tx, fire_lvl);
+        flame(s, ty * W + tx, fire_lvl, owner);
         if g == 2 || g == 6 || g == 7 { break; }
         let o = bomb_at(s, tx, ty);
         if o >= 0 { s.bombs[o].t = 0; break; }
     }
 }
 
-// Explosion at tile bx by with arm length rng and flame linger level (1..15): blocks stop an arm, other bombs are set off.
-fn explode_at(s: State&, bx: i64, by: i64, rng: i64, fire_lvl: i64) {
+// Explosion at tile bx by with arm length rng, flame linger level (1..15), and owner (0..3 player).
+fn explode_at(s: State&, bx: i64, by: i64, rng: i64, fire_lvl: i64, owner: i64) {
     if bx <= 0 || bx >= W - 1 || by <= 0 || by >= H - 1 { return; }
-    flame(s, by * W + bx, fire_lvl);
-    explode_arm(s, bx, by, 1, 0, rng, fire_lvl);
-    explode_arm(s, bx, by, -1, 0, rng, fire_lvl);
-    explode_arm(s, bx, by, 0, 1, rng, fire_lvl);
-    explode_arm(s, bx, by, 0, -1, rng, fire_lvl);
+    flame(s, by * W + bx, fire_lvl, owner);
+    explode_arm(s, bx, by, 1, 0, rng, fire_lvl, owner);
+    explode_arm(s, bx, by, -1, 0, rng, fire_lvl, owner);
+    explode_arm(s, bx, by, 0, 1, rng, fire_lvl, owner);
+    explode_arm(s, bx, by, 0, -1, rng, fire_lvl, owner);
 }
 
 fn explode(s: State&, b: Bomb) {
     let bx = b.x as i64;
     let by = b.y as i64;
+    let ow = b.owner as i64;
     if b.blast_dir != Dir.None {
         if bx > 0 && bx < W - 1 && by > 0 && by < H - 1 {
-            flame(s, by * W + bx, b.fire_lvl as i64);
-            explode_arm(s, bx, by, dir_dx(b.blast_dir), dir_dy(b.blast_dir), (b.range as i64) * 2 + 2, b.fire_lvl as i64);
+            flame(s, by * W + bx, b.fire_lvl as i64, ow);
+            explode_arm(s, bx, by, dir_dx(b.blast_dir), dir_dy(b.blast_dir), (b.range as i64) * 2 + 2, b.fire_lvl as i64, ow);
         }
     } else {
-        explode_at(s, bx, by, b.range as i64, b.fire_lvl as i64);
+        explode_at(s, bx, by, b.range as i64, b.fire_lvl as i64, ow);
     }
 }
 
@@ -595,7 +633,10 @@ fn step_player(s: State&, i: i64) {
     // Napalm: leave slowly-decaying fire on the tile you just walked out of.
     if s.players[i].napalm > 0 && (tx != otx || ty != oty) {
         let og = s.grid[oty * W + otx];
-        if og == 0 || (og >= 64 && og < 96) || is_fog(og) { s.grid[oty * W + otx] = 95; }
+        if og == 0 || (og >= 64 && og < 96) || is_fog(og) {
+            s.grid[oty * W + otx] = 95;
+            fowner_set(s, oty * W + otx, i);
+        }
     }
     let g = s.grid[ty * W + tx];
     if is_power(g) {
@@ -648,7 +689,7 @@ fn step_player(s: State&, i: i64) {
             s.fireballs.push(Fireball { sx as i32, sy as i32, fdir, i as u8, 0, 120 });
             s.players[i].fireballs -= 1;
         } else if p.flamer > 0 {
-            explode_arm(s, tx, ty, dir_dx(fdir), dir_dy(fdir), 3, 10);
+            explode_arm(s, tx, ty, dir_dx(fdir), dir_dy(fdir), 3, 10, i);
             s.players[i].flamer -= 1;
         }
     }
@@ -893,7 +934,7 @@ fn tick(s: State&, r: rng&, n: i64) {
     for i in 4 {
         guard s.missiles[i].active != 0 else { continue; }
         if s.players[i].life != Life.Alive {
-            explode_at(s, s.missiles[i].x / TILE, s.missiles[i].y / TILE, max(3, s.players[i].range as i64), 15);
+            explode_at(s, s.missiles[i].x / TILE, s.missiles[i].y / TILE, max(3, s.players[i].range as i64), 15, i);
             s.missiles[i].active = 0;
             continue;
         }
@@ -937,7 +978,7 @@ fn tick(s: State&, r: rng&, n: i64) {
             }
         }
         if boom {
-            explode_at(s, s.missiles[i].x / TILE, s.missiles[i].y / TILE, max(3, s.players[i].range as i64), 15);
+            explode_at(s, s.missiles[i].x / TILE, s.missiles[i].y / TILE, max(3, s.players[i].range as i64), 15, i);
             s.missiles[i].active = 0;
         }
     }
@@ -981,8 +1022,9 @@ fn tick(s: State&, r: rng&, n: i64) {
         if hit {
             let ex = max(1, min(W - 2, (s.fireballs[fi].x as i64) / TILE));
             let ey = max(1, min(H - 2, (s.fireballs[fi].y as i64) / TILE));
+            let fbo = s.fireballs[fi].owner as i64;
             remove_at(s.fireballs, fi);
-            explode_at(s, ex, ey, 1, 12);
+            explode_at(s, ex, ey, 1, 12, fbo);
         } else {
             fi += 1;
         }
@@ -1004,8 +1046,9 @@ fn tick(s: State&, r: rng&, n: i64) {
             if s.sheep[k].alive != 0 && s.sheep[k].x / TILE == m.x && s.sheep[k].y / TILE == m.y { trig = true; }
         }
         if trig {
+            let mo = m.owner as i64;
             remove_at(s.mines, mi);
-            explode_at(s, m.x as i64, m.y as i64, max(2, s.players[m.owner].range as i64), 15);
+            explode_at(s, m.x as i64, m.y as i64, max(2, s.players[mo].range as i64), 15, mo);
         } else {
             mi += 1;
         }
@@ -1077,6 +1120,9 @@ fn tick(s: State&, r: rng&, n: i64) {
             if s.sheep[k].on_fire == 0 { s.sheep[k].on_fire = 360; s.sheep[k].t = 0; }
         }
     }
+    if s.match_mode == MatchMode.Prey && s.round_timer > 0 {
+        s.round_timer -= 1;
+    }
     var joined = 0;
     var alive = 0;
     var last = 0;
@@ -1084,7 +1130,12 @@ fn tick(s: State&, r: rng&, n: i64) {
         guard s.players[i].life != Life.Off else { continue; }
         joined += 1;
         if s.players[i].life == Life.Alive {
-            var burned = is_flame(s.grid[(s.players[i].y / TILE) * W + s.players[i].x / TILE]);
+            let ti = (s.players[i].y / TILE) * W + s.players[i].x / TILE;
+            var burned = is_flame(s.grid[ti]);
+            if burned && s.match_mode == MatchMode.Teams2v2 && s.friendly_fire == 0 {
+                let fo = fowner_get(s, ti);
+                if fo < 4 && fo != i && team_of(fo) == team_of(i) { burned = false; }
+            }
             for k in 2 {
                 if s.sheep[k].alive != 0 && s.sheep[k].on_fire > 0 && hits(s.players[i].x, s.players[i].y, s.sheep[k].x, s.sheep[k].y) {
                     burned = true;
@@ -1097,16 +1148,94 @@ fn tick(s: State&, r: rng&, n: i64) {
             else { alive += 1; last = i; }
         }
     }
-    if (joined > 1 && alive <= 1) || (joined == 1 && alive == 0) {
+    var round_done = false;
+    var win_mask = 0;
+    match s.match_mode {
+        FreeForAll => {
+            if (joined > 1 && alive <= 1) || (joined == 1 && alive == 0) {
+                round_done = true;
+                if joined > 1 && alive == 1 { win_mask = 1 << last; }
+            }
+        },
+        Teams2v2 => {
+            var t0_on = 0; var t1_on = 0;
+            var t0_al = 0; var t1_al = 0;
+            for i in 4 {
+                if s.players[i].life == Life.Off { continue; }
+                if team_of(i) == 0 { t0_on += 1; if s.players[i].life == Life.Alive { t0_al += 1; } }
+                else { t1_on += 1; if s.players[i].life == Life.Alive { t1_al += 1; } }
+            }
+            if t0_on > 0 && t1_on > 0 {
+                if t0_al == 0 || t1_al == 0 {
+                    round_done = true;
+                    if t0_al > 0 { for i in 4 { if s.players[i].life != Life.Off && team_of(i) == 0 { win_mask |= 1 << i; } } }
+                    else if t1_al > 0 { for i in 4 { if s.players[i].life != Life.Off && team_of(i) == 1 { win_mask |= 1 << i; } } }
+                }
+            } else if (joined > 1 && alive <= 1) || (joined == 1 && alive == 0) {
+                round_done = true;
+                if joined > 1 && alive == 1 { win_mask = 1 << last; }
+            }
+        },
+        Prey => {
+            let vp = s.vip_slot as i64;
+            let prey_alive = s.players[vp].life == Life.Alive;
+            var hunt_on = 0; var hunt_al = 0;
+            for i in 4 {
+                if i != vp && s.players[i].life != Life.Off {
+                    hunt_on += 1;
+                    if s.players[i].life == Life.Alive { hunt_al += 1; }
+                }
+            }
+            if hunt_on > 0 {
+                if !prey_alive {
+                    round_done = true;
+                    for i in 4 { if i != vp && s.players[i].life != Life.Off { win_mask |= 1 << i; } }
+                } else if s.round_timer == 0 || hunt_al == 0 {
+                    round_done = true;
+                    win_mask = 1 << vp;
+                }
+            } else if alive == 0 {
+                round_done = true;
+            }
+        },
+        Predator => {
+            let vp = s.vip_slot as i64;
+            let pred_alive = s.players[vp].life == Life.Alive;
+            var run_on = 0; var run_al = 0;
+            for i in 4 {
+                if i != vp && s.players[i].life != Life.Off {
+                    run_on += 1;
+                    if s.players[i].life == Life.Alive { run_al += 1; }
+                }
+            }
+            if run_on > 0 {
+                if !pred_alive {
+                    round_done = true;
+                    for i in 4 { if i != vp && s.players[i].life != Life.Off { win_mask |= 1 << i; } }
+                } else if run_al == 0 {
+                    round_done = true;
+                    win_mask = 1 << vp;
+                }
+            } else if alive == 0 {
+                round_done = true;
+            }
+        },
+    }
+    if round_done {
         s.over = 150;
         s.dance_who = 255;
-        if joined > 1 && alive == 1 {
-            s.players[last].wins += 1;
-            s.players[last].streak += 1;
-            for i in 4 { if i != last { s.players[i].streak = 0; } }
-            if s.players[last].wins % 5 == 0 {
-                s.over = 270;
-                s.dance_who = last as u8;
+        if win_mask != 0 {
+            for i in 4 {
+                if (win_mask & (1 << i)) != 0 {
+                    s.players[i].wins += 1;
+                    s.players[i].streak += 1;
+                    if s.players[i].wins % 5 == 0 && s.dance_who == 255 {
+                        s.over = 270;
+                        s.dance_who = i as u8;
+                    }
+                } else {
+                    s.players[i].streak = 0;
+                }
             }
         } else {
             for i in 4 { s.players[i].streak = 0; }
@@ -2631,12 +2760,41 @@ fn draw_player(c: ui::Context, s: State&, i: i64, x: f32, y: f32, t: f32, tm: f3
     else if (bits & RIGHT) != 0 { fx = 1.0; fy = 0.0; }
     let walk = if (bits & 15) != 0 { 0.05 * t * sin(tm * 22.0) } else { 0.0 };
     let gh = s.players[i].ghost;
+    let is_prey = s.match_mode == MatchMode.Prey && i == (s.vip_slot as i64);
+    let is_pred_runner = s.match_mode == MatchMode.Predator && i != (s.vip_slot as i64);
+    let is_predator = s.match_mode == MatchMode.Predator && i == (s.vip_slot as i64);
     if gh > 0 {          // ghosts are unseen; only their owner sees a faint, flickering outline
         if i == s.you && (gh > 120 || (gh / 6) % 2 == 0) {
             ui::stroke_circle(c, ui::rect(x - k * 0.5, y - k * 0.5 + walk, k, k), 2.0, ui::rgba(255, 255, 255, 70));
             ui::fill_circle(c, ui::rect(x - k * 0.5, y - k * 0.5 + walk, k, k), ui::rgba(255, 255, 255, 18));
         }
         return;
+    }
+    if is_prey {
+        if i == s.you {
+            ui::stroke_circle(c, ui::rect(x - k * 0.52, y - k * 0.52 + walk, k * 1.04, k * 1.04), 2.5, ui::rgba(110, 255, 190, 140));
+            ui::fill_circle(c, ui::rect(x - k * 0.48, y - k * 0.48 + walk, k * 0.96, k * 0.96), ui::rgba(110, 255, 190, 35));
+        }
+        return;
+    }
+    if is_pred_runner {
+        if i == s.you {
+            ui::stroke_circle(c, ui::rect(x - k * 0.52, y - k * 0.52 + walk, k * 1.04, k * 1.04), 2.5, ui::rgba(140, 220, 255, 140));
+            ui::fill_circle(c, ui::rect(x - k * 0.48, y - k * 0.48 + walk, k * 0.96, k * 0.96), ui::rgba(140, 220, 255, 32));
+        } else if (bits & 15) != 0 {
+            // Only slightly visible shimmer while moving!
+            ui::stroke_circle(c, ui::rect(x - k * 0.46, y - k * 0.46 + walk, k * 0.92, k * 0.92), 2.0, ui::rgba(210, 235, 255, 48));
+            ui::fill_circle(c, ui::rect(x - k * 0.36, y - k * 0.36 + walk, k * 0.72, k * 0.72), ui::rgba(210, 235, 255, 18));
+        }
+        return;
+    }
+    if is_predator {
+        let pulse = 1.18 + 0.08 * sin(tm * 8.0);
+        ui::stroke_circle(c, ui::rect(x - k * 0.55 * pulse, y - k * 0.55 * pulse, k * 1.1 * pulse, k * 1.1 * pulse), 3.5, ui::rgba(255, 50, 50, 210));
+    }
+    if s.match_mode == MatchMode.Teams2v2 {
+        let tcol = if team_of(i) == 0 { ui::rgb(255, 110, 80) } else { ui::rgb(70, 195, 255) };
+        ui::stroke_circle(c, ui::rect(x - k * 0.6, y + k * 0.14, k * 1.2, k * 0.46), 3.0, tcol);
     }
     if (bits & HOLD) != 0 { ui::stroke_rect(c, ui::rect(x - k * 0.62, y - k * 0.62, k * 1.24, k * 1.24), k * 0.3, 3.0, ui::rgba(255, 255, 255, 190)); }
     if s.players[i].napalm > 0 {
@@ -3020,6 +3178,13 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
                 var nm: u8[>..] = [];
                 player_name(s, i, nm);
                 var line: u8[>..] = [];
+                if s.match_mode == MatchMode.Teams2v2 {
+                    format(line, if team_of(i) == 0 { "[T1] " } else { "[T2] " });
+                } else if s.match_mode == MatchMode.Prey && i == (s.vip_slot as i64) {
+                    line.append("[PREY] ");
+                } else if s.match_mode == MatchMode.Predator && i == (s.vip_slot as i64) {
+                    line.append("[PRED] ");
+                }
                 if s.players[i].streak >= 2 { format(line, nm[..], " ", s.players[i].wins, " [", s.players[i].streak, "x]"); }
                 else { format(line, nm[..], " ", s.players[i].wins); }
                 let lw = ui::text_width(ui::font(hud), line);
@@ -3030,6 +3195,9 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
                 x += boxw + 12.0;
             }
             var tag: u8[>..] = [];
+            if s.match_mode == MatchMode.Prey { format(tag, "PREY ", (s.round_timer as i64 + 59) / 60, "s  "); }
+            else if s.match_mode == MatchMode.Teams2v2 { tag.append("2v2  "); }
+            else if s.match_mode == MatchMode.Predator { tag.append("PREDATOR  "); }
             if mode == "solo" { tag.append("SOLO"); } else if mode == "host" { tag.append("HOST"); } else { format(tag, "CLIENT P", s.you + 1); if mode == "udp" { tag.append(" UDP"); } }
             if fx.lost { tag.append("  DISCONNECTED"); }
             text(hud, vw - 14.0 - ui::text_width(ui::font(hud), tag), 10.0, tag, ui::rgb(160, 168, 190));
@@ -3054,12 +3222,35 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
             var who = -1;
             for i in 4 { if s.players[i].life == Life.Alive { who = i; } }
             var msg: u8[>..] = [];
-            if who >= 0 && s.players[who].life != Life.Off {
-                var nm: u8[>..] = [];
-                player_name(s, who, nm);
-                if s.players[who].streak >= 2 { format(msg, nm[..], " WINS! (", s.players[who].streak, "x)"); }
-                else { format(msg, nm[..], " WINS!"); }
-            } else { msg.append("DRAW"); }
+            match s.match_mode {
+                Teams2v2 => {
+                    var t0_al = 0; var t1_al = 0;
+                    for i in 4 {
+                        if s.players[i].life == Life.Alive {
+                            if team_of(i) == 0 { t0_al += 1; } else { t1_al += 1; }
+                        }
+                    }
+                    if t0_al > 0 && t1_al == 0 { msg.append("TEAM 1 WINS!"); }
+                    else if t1_al > 0 && t0_al == 0 { msg.append("TEAM 2 WINS!"); }
+                    else { msg.append("DRAW"); }
+                },
+                Prey => {
+                    if s.players[s.vip_slot].life == Life.Alive { msg.append("PREY SURVIVED!"); }
+                    else { msg.append("HUNTERS WIN!"); }
+                },
+                Predator => {
+                    if s.players[s.vip_slot].life == Life.Alive { msg.append("PREDATOR WINS!"); }
+                    else { msg.append("RUNNERS WIN!"); }
+                },
+                FreeForAll => {
+                    if who >= 0 && s.players[who].life != Life.Off {
+                        var nm: u8[>..] = [];
+                        player_name(s, who, nm);
+                        if s.players[who].streak >= 2 { format(msg, nm[..], " WINS! (", s.players[who].streak, "x)"); }
+                        else { format(msg, nm[..], " WINS!"); }
+                    } else { msg.append("DRAW"); }
+                },
+            }
             let w = ui::text_width(ui::font(big), msg);
             ui::fill_rect(big, ui::rect(0, vh / 2.0 - 75.0, vw, 145.0), 0.0, ui::rgba(10, 12, 20, 195));
             text(big, (vw - w) / 2.0, vh / 2.0 - 60.0, msg, if who >= 0 { col(who) } else { ui::rgb(230, 230, 235) });
@@ -3359,6 +3550,8 @@ fn main() {
     s.fire_rand = 0;
     s.fire_range = 2;
     s.range_rand = 0;
+    s.friendly_fire = 1;
+    s.match_mode = MatchMode.FreeForAll;
     reset_round(s, r);
     var start_host = mode == GameMode.Host;
     var start_join = mode == GameMode.Join;
@@ -4000,6 +4193,22 @@ fn main() {
                     if upnp_status.len > 0 {
                         ui::layout_row_dynamic(menu, 24.0, 1);
                         ui::label(menu, upnp_status[..], ui::TEXT_LEFT);
+                    }
+                }
+                ui::layout_row_dynamic(menu, 28.0, 1);
+                ui::label(menu, "Game Mode:", ui::TEXT_LEFT);
+                let prev_mm = s.match_mode;
+                ui::layout_row_dynamic(menu, 32.0, 4);
+                if ui::option_label(menu, "FFA", s.match_mode == MatchMode.FreeForAll) { s.match_mode = MatchMode.FreeForAll; }
+                if ui::option_label(menu, "2v2 Teams", s.match_mode == MatchMode.Teams2v2) { s.match_mode = MatchMode.Teams2v2; }
+                if ui::option_label(menu, "Prey", s.match_mode == MatchMode.Prey) { s.match_mode = MatchMode.Prey; }
+                if ui::option_label(menu, "Predator", s.match_mode == MatchMode.Predator) { s.match_mode = MatchMode.Predator; }
+                if s.match_mode != prev_mm { reset_round(s, r); }
+                if s.match_mode == MatchMode.Teams2v2 {
+                    ui::layout_row_dynamic(menu, 28.0, 1);
+                    var ff_on = s.friendly_fire != 0;
+                    if ui::checkbox_label(menu, "2v2 Friendly Fire (teammates can bomb each other)", ff_on) {
+                        s.friendly_fire = if ff_on { 1 } else { 0 };
                     }
                 }
                 ui::layout_row_dynamic(menu, 28.0, 1);
