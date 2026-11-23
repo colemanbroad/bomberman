@@ -108,50 +108,44 @@ footer p { max-width: 80ch; }
   </div>
 
   <section id="download">
-    <h2>Get it running</h2>
-    <p class="muted">The game is one small program. It is not signed, so each system asks you once to confirm that you trust it.</p>
+    <h2>Quick install (recommended)</h2>
+    <p class="muted">Paste one line to download, skip OS quarantine warnings, create a clickable app icon, and auto-update whenever a new version drops.</p>
     <div class="two">
       <div class="card">
         <h3>Mac</h3>
-        <p class="muted">Apple Silicon (M1 or newer).</p>
-        <ol>
-          <li>Download and unzip. You get one file, <code>bomberman-portable</code>.</li>
-          <li>Open Terminal, go to that folder, and run:</li>
-        </ol>
-        <pre><code>cd ~/Downloads
-xattr -d com.apple.quarantine bomberman-portable
-chmod +x bomberman-portable
-./bomberman-portable solo</code><button class="copy" type="button">Copy</button></pre>
-        <p class="note">The first line of the second command clears the "downloaded from the internet" block. Without it, macOS refuses to open the file.</p>
+        <p class="muted">Apple Silicon (M1 or newer). Open <b>Terminal</b> and paste:</p>
+        <pre><code>curl -fsSL https://colemanbroad.github.io/bomberman/play.sh | sh</code><button class="copy" type="button">Copy</button></pre>
+        <p class="note">Installs <code>~/Applications/Bomberman.app</code> and launches right into the start menu. Next time, just double-click <b>Bomberman</b> in Applications (or Spotlight) — it auto-updates automatically.</p>
       </div>
       <div class="card">
         <h3>Windows</h3>
-        <p class="muted">Windows 10 or 11, 64-bit.</p>
-        <ol>
-          <li>Download and unzip the folder. Keep the files together.</li>
-          <li>Open Command Prompt in that folder and run:</li>
-        </ol>
-        <pre><code>bomberman.exe solo</code><button class="copy" type="button">Copy</button></pre>
-        <p class="note">If SmartScreen warns about an unknown app, choose More info, then Run anyway. If the firewall asks, allow it.</p>
+        <p class="muted">Windows 10 or 11 (64-bit). Open <b>PowerShell</b> and paste:</p>
+        <pre><code>irm https://colemanbroad.github.io/bomberman/play.ps1 | iex</code><button class="copy" type="button">Copy</button></pre>
+        <p class="note">Creates a <b>Bomberman</b> Desktop shortcut and launches right into the start menu. Double-click the Desktop icon anytime to auto-update and play. Allow it through Windows Firewall when asked.</p>
       </div>
     </div>
   </section>
 
   <section id="play">
     <h2>Play with friends</h2>
-    <p class="muted">One person hosts and everyone else joins them. All of you need to be on the same network, such as your home Wi-Fi.</p>
+    <p class="muted">Launch the app to pick <b>Play Solo</b>, <b>Join Game</b>, or <b>Host Game</b> right from the start menu—no terminal commands needed.</p>
     <div class="two">
       <div class="card">
         <h3>The host</h3>
-        <p>Start a game and tell your friends your local address. On a Mac, run <code>ipconfig getifaddr en0</code> to find it; on Windows, run <code>ipconfig</code>.</p>
-        <pre><code>./bomberman-portable host</code><button class="copy" type="button">Copy</button></pre>
-        <p class="note">On Windows, use <code>bomberman.exe host</code>. Allow it through the firewall when asked.</p>
+        <p>Choose your networking mode in the Start menu (or switch anytime inside <b>Host Settings</b>):</p>
+        <ol>
+          <li><b>LAN / Tailscale</b> — instant play on the same Wi-Fi or over Tailscale.</li>
+          <li><b>UPnP Port-Forward</b> — automatically opens your router's port (and closes it on exit) and shows your public IP.</li>
+          <li><b>playit.gg</b> — works behind any firewall or ISP CGNAT; point a free TCP+UDP tunnel to port <code>8080</code> and share the address.</li>
+        </ol>
+        <pre><code>./bomberman-portable host --upnp</code><button class="copy" type="button">Copy</button></pre>
+        <p class="note">CLI options still work too: <code>host [--port N] [--upnp | --lan | --playit ADDR]</code>.</p>
       </div>
       <div class="card">
         <h3>Everyone else</h3>
-        <p>Join by the host's address. The label at the top right of the window should read <b>CLIENT</b>, not SOLO.</p>
+        <p>Type the host's IP or <code>host:port</code> (like <code>192.168.4.46</code> or <code>foo.gl.at.ply.gg:24680</code>) in the Start menu and click <b>Join Game</b>. Your last server and profile are remembered automatically.</p>
         <pre><code>./bomberman-portable join 192.168.4.46</code><button class="copy" type="button">Copy</button></pre>
-        <p class="note">Replace the numbers with the host's address. Low-latency UDP is used automatically (with automatic WebSocket fallback if UDP port 8080 is blocked; add <code>tcp</code> to force TCP).</p>
+        <p class="note">The top right reads <b>CLIENT P2 UDP</b> once low-latency UDP connects (with automatic WebSocket fallback if UDP is blocked; check "Force TCP only" or add <code>tcp</code> if needed).</p>
       </div>
     </div>
   </section>
