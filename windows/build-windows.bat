@@ -8,5 +8,9 @@ if "%OPENSSL_ROOT_DIR%"=="" if not "%VCPKG_ROOT%"=="" set "OPENSSL_ROOT_DIR=%VCP
 if "%OPENSSL_ROOT_DIR%"=="" (echo Set OPENSSL_ROOT_DIR to your OpenSSL folder, for example %%VCPKG_ROOT%%\installed\x64-windows. & exit /b 1)
 if not exist dist mkdir dist
 goose build bomberman.goose -o dist\bomberman.exe || exit /b 1
+if exist assets\icon.ico (
+  copy /y assets\icon.ico dist\icon.ico >nul
+  powershell -NoProfile -ExecutionPolicy Bypass -File windows\embed-icon.ps1 -ExePath dist\bomberman.exe -IcoPath assets\icon.ico || exit /b 1
+)
 copy /y "%OPENSSL_ROOT_DIR%\bin\*.dll" dist >nul
 echo Built dist\bomberman.exe
