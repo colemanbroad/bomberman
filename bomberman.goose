@@ -190,10 +190,10 @@ struct Mine { x: u8, y: u8, owner: u8, arm: u8 }
 struct Missile { x: i32, y: i32, active: u8, dir: Dir, portal_cd: u8, t: u16 }
 // Fireball projectile launched by Fireball Thrower (`F`).
 struct Fireball { x: i32, y: i32, dir: Dir, owner: u8, portal_cd: u8, life: u8 }
-// A sheep wanders at random and blocks the way like a movable block. dir: None when grazing.
-struct Sheep { x: i64, y: i64, alive: u8, dir: Dir, t: u8, portal_cd: u8 }
+// A sheep wanders at random and blocks the way like a movable block. dir: None when grazing; on_fire > 0: blazing & lethal!
+struct Sheep { x: i64, y: i64, alive: u8, dir: Dir, t: u8, portal_cd: u8, on_fire: u16, facing_left: u8 }
 // fences: 2 bits per tile packed into 49 bytes (bit 0 = right edge, bit 1 = bottom edge); permanent boundary barriers.
-struct State { grid: u8[195], fences: u8[49], players: Player[4], bombs: Bomb[..16], mines: Mine[..8], missiles: Missile[4], fireballs: Fireball[..8], sheep: Sheep[2], drops: u8, regrow: u8, map: Map, portals_on: u8, portals: u8[4], power_mask: u32, fuse_ticks: u16, fuse_rand: u8, fire_ticks: u8, fire_rand: u8, fire_range: u8, range_rand: u8, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
+struct State { grid: u8[195], fences: u8[49], players: Player[4], bombs: Bomb[..16], mines: Mine[..8], missiles: Missile[4], fireballs: Fireball[..8], sheep: Sheep[2], drops: u8, regrow: u8, map: Map, portals_on: u8, portals: u8[4], power_mask: u32, fuse_ticks: u16, fuse_rand: u8, fire_ticks: u8, fire_rand: u8, fire_range: u8, range_rand: u8, day_night_on: u8, day_phase: u16, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
 
 // UDP (udp.c): inputs and snapshots fly as datagrams when a client joins with `udp`; the WebSocket stays up for
 // joining, leaving and a slow heartbeat. Each snapshot carries its tick, so stale or reordered ones are dropped.
@@ -338,7 +338,9 @@ fn sheep_blocked(s: State&, k: i64, x: i64, y: i64) -> bool {
     let me = s.sheep[k];
     for j in 4 {
         let q = s.players[j];
-        if (q.life == Life.Alive || q.life == Life.BlackSheep) && hits(x, y, q.x, q.y) && !hits(me.x, me.y, q.x, q.y) { return true; }
+        // Flaming sheep charge straight into alive players instead of stopping!
+        let stop_p = (me.on_fire == 0 && q.life == Life.Alive) || q.life == Life.BlackSheep;
+        if stop_p && hits(x, y, q.x, q.y) && !hits(me.x, me.y, q.x, q.y) { return true; }
     }
     for j in 2 {
         let q = s.sheep[j];
@@ -418,7 +420,7 @@ fn reset_round(s: State&, r: rng&) {
     for k in 2 {
         let tx = if k == 0 { 5 } else { W - 6 };
         s.grid[(H / 2) * W + tx] = 0;
-        s.sheep[k] = Sheep { tx * TILE + TILE / 2, (H / 2) * TILE + TILE / 2, 1, Dir.None, 0, 0 };
+        s.sheep[k] = Sheep { tx * TILE + TILE / 2, (H / 2) * TILE + TILE / 2, 1, Dir.None, 0, 0, 0, if k == 1 { 1 } else { 0 } };
     }
     // Linked portal pair on symmetric open interior tiles
     let pset = r.rand_int(3);
@@ -434,6 +436,7 @@ fn reset_round(s: State&, r: rng&) {
     s.bombs.resize(0);
     s.mines.resize(0);
     s.fireballs.resize(0);
+    s.day_phase = 0;
     s.over = 0;
     s.dance_who = 255;
 }
@@ -809,17 +812,30 @@ fn tick(s: State&, r: rng&, n: i64) {
             Off => {},
         }
     }
+    if s.day_night_on != 0 {
+        s.day_phase = ((s.day_phase as i64 + 1) % 2400) as u16;
+    } else {
+        s.day_phase = 0;
+    }
     for k in 2 {
         guard s.sheep[k].alive != 0 else { continue; }
         if s.sheep[k].portal_cd > 0 { s.sheep[k].portal_cd -= 1; }
-        if s.sheep[k].t == 0 {
-            s.sheep[k].dir = dir_from_int(r.rand_int(5));
-            s.sheep[k].t = (40 + r.rand_int(80)) as u8;
+        let blazing = s.sheep[k].on_fire > 0;
+        if blazing {
+            s.sheep[k].on_fire -= 1;
+            if s.sheep[k].on_fire == 0 { s.sheep[k].alive = 0; continue; }
+        }
+        if s.sheep[k].t == 0 || (blazing && s.sheep[k].dir == Dir.None) {
+            s.sheep[k].dir = if blazing { dir_from_int(1 + r.rand_int(4)) } else { dir_from_int(r.rand_int(5)) };
+            s.sheep[k].t = (if blazing { 15 + r.rand_int(30) } else { 40 + r.rand_int(80) }) as u8;
         } else { s.sheep[k].t -= 1; }
         let d = s.sheep[k].dir;
+        if d == Dir.Left { s.sheep[k].facing_left = 1; }
+        else if d == Dir.Right { s.sheep[k].facing_left = 0; }
         if d == Dir.None { continue; }
-        let dx = dir_dx(d) * 2;
-        let dy = dir_dy(d) * 2;
+        let sp = if blazing { 4 } else { 2 };
+        let dx = dir_dx(d) * sp;
+        let dy = dir_dy(d) * sp;
         if sheep_blocked(s, k, s.sheep[k].x + dx, s.sheep[k].y + dy) { s.sheep[k].t = 0; }
         else {
             s.sheep[k].x += dx;
@@ -1057,7 +1073,9 @@ fn tick(s: State&, r: rng&, n: i64) {
         }
     }
     for k in 2 {
-        if s.sheep[k].alive != 0 && is_flame(s.grid[(s.sheep[k].y / TILE) * W + s.sheep[k].x / TILE]) { s.sheep[k].alive = 0; }
+        if s.sheep[k].alive != 0 && is_flame(s.grid[(s.sheep[k].y / TILE) * W + s.sheep[k].x / TILE]) {
+            if s.sheep[k].on_fire == 0 { s.sheep[k].on_fire = 360; s.sheep[k].t = 0; }
+        }
     }
     var joined = 0;
     var alive = 0;
@@ -1066,7 +1084,13 @@ fn tick(s: State&, r: rng&, n: i64) {
         guard s.players[i].life != Life.Off else { continue; }
         joined += 1;
         if s.players[i].life == Life.Alive {
-            if is_flame(s.grid[(s.players[i].y / TILE) * W + s.players[i].x / TILE]) {
+            var burned = is_flame(s.grid[(s.players[i].y / TILE) * W + s.players[i].x / TILE]);
+            for k in 2 {
+                if s.sheep[k].alive != 0 && s.sheep[k].on_fire > 0 && hits(s.players[i].x, s.players[i].y, s.sheep[k].x, s.sheep[k].y) {
+                    burned = true;
+                }
+            }
+            if burned {
                 s.players[i].life = Life.BlackSheep;
                 s.players[i].held = 1;
             }
@@ -1229,6 +1253,37 @@ fn make_dance_sfx() -> audio::Sound {
         voice(pcm, at, len, notes[k] - 12, 2, 0.45);
     }
     for i in pcm.len { pcm[i] = max(-1.0, min(1.0, pcm[i] * 0.6)); }
+    return audio::create_sound(pcm);
+}
+
+// Soft nighttime cricket chirps & evening breeze for the Day/Night cycle.
+fn make_night_sfx(r: rng&) -> audio::Sound {
+    let n = 48000 * 3; // 3-second seamless loop
+    var pcm: f32[>..] = [];
+    pcm.resize(n, 0.0);
+    var lp = 0.0;
+    for i in n {
+        lp += 0.015 * (r.rand_flt() * 2.0 - 1.0 - lp);
+        var s = lp * 0.14;
+        // Two rhythmic cricket chirps per 3s loop
+        let p0 = i % 72000;
+        if p0 < 14000 {
+            let pulse = p0 % 3500;
+            if pulse < 2200 {
+                let env = sin(pulse * 3.14159 / 2200.0);
+                s += sin(i * TAU * 4250.0 / 48000.0) * 0.14 * env;
+            }
+        }
+        let p1 = (i + 31000) % 48000;
+        if p1 < 9000 {
+            let pulse = p1 % 3000;
+            if pulse < 1800 {
+                let env = sin(pulse * 3.14159 / 1800.0);
+                s += sin(i * TAU * 4680.0 / 48000.0) * 0.09 * env;
+            }
+        }
+        pcm[i] = max(-1.0, min(1.0, s)) as f32;
+    }
     return audio::create_sound(pcm);
 }
 
@@ -1505,7 +1560,10 @@ fn hear(prev: State&, s: State&, sfx: Sfx, fx: Fx&) {
         if prev.grid[i] == 6 && s.grid[i] == 2 { audio::play(sfx.clank, 0.5, pan((i % W) * TILE), 1.0, false); }
         else if prev.grid[i] == 0 && (s.grid[i] == 2 || s.grid[i] == 6 || s.grid[i] == 7) { audio::play(sfx.clank, 0.3, pan((i % W) * TILE), 0.7, false); }
     }
-    for k in 2 { if prev.sheep[k].alive != 0 && s.sheep[k].alive == 0 { audio::play(sfx.die, 0.6, pan(s.sheep[k].x), 1.6, false); } }
+    for k in 2 {
+        if prev.sheep[k].alive != 0 && s.sheep[k].alive == 0 { audio::play(sfx.die, 0.6, pan(s.sheep[k].x), 1.6, false); }
+        if prev.sheep[k].on_fire == 0 && s.sheep[k].on_fire > 0 { audio::play(sfx.die, 0.75, pan(s.sheep[k].x), 2.1, false); }
+    }
     for i in prev.mines.len {
         if mine_at(s, prev.mines[i].x, prev.mines[i].y) < 0 {
             audio::play(sfx.boom, 0.9, pan(prev.mines[i].x * TILE), 1.1, false);
@@ -1544,6 +1602,154 @@ fn hear(prev: State&, s: State&, sfx: Sfx, fx: Fx&) {
 }
 
 // ---- drawing ----------------------------------------------------------------------------------
+
+// Procedural 512x256 GPU tile atlas (8x4 grid of 64x64 tiles) for the "Detailed Textures" mode.
+// Rows 0..3 = Island, Forest, Mountains, Desert: col 0 = floor, col 1 = wall, col 2 = brick, col 3 = brush;
+// Row 3 cols 4..6 = shared steel crate, gift crate, semi-permeable grate.
+fn set_px(buf: u8[:], w: i64, x: i64, y: i64, r: i64, g: i64, b: i64, a: i64) {
+    let i = (y * w + x) * 4;
+    buf[i + 0] = max(0, min(255, r)) as u8;
+    buf[i + 1] = max(0, min(255, g)) as u8;
+    buf[i + 2] = max(0, min(255, b)) as u8;
+    buf[i + 3] = max(0, min(255, a)) as u8;
+}
+
+fn hash2(x: i64, y: i64, seed: i64) -> i64 {
+    let h = (x * 374761393 + y * 668265263 + seed * 1442695041) & 2147483647;
+    return ((h ^ (h >> 13)) * 1274126177 >> 16) & 255;
+}
+
+fn make_tile_atlas() -> gfx::Texture {
+    let aw = 512;
+    let ah = 256;
+    var px: u8[>..] = [];
+    px.resize(aw * ah * 4, 255);
+    for row in 4 {
+        // Biome palettes (floor, wall, brick, brush)
+        let fr = if row == 0 { 222 } else if row == 1 { 62 } else if row == 2 { 106 } else { 228 };
+        let fg = if row == 0 { 196 } else if row == 1 { 114 } else if row == 2 { 114 } else { 184 };
+        let fb = if row == 0 { 134 } else if row == 1 { 56 } else if row == 2 { 132 } else { 114 };
+
+        let wr = if row == 0 { 74 } else if row == 1 { 58 } else if row == 2 { 92 } else { 158 };
+        let wg = if row == 0 { 94 } else if row == 1 { 72 } else if row == 2 { 102 } else { 118 };
+        let wb = if row == 0 { 104 } else if row == 1 { 54 } else if row == 2 { 122 } else { 66 };
+
+        let br = if row == 0 { 166 } else if row == 1 { 126 } else if row == 2 { 142 } else { 196 };
+        let bg = if row == 0 { 106 } else if row == 1 { 82 } else if row == 2 { 154 } else { 134 };
+        let bb = if row == 0 { 58 } else if row == 1 { 46 } else if row == 2 { 174 } else { 78 };
+
+        let lr = if row == 0 { 44 } else if row == 1 { 40 } else if row == 2 { 48 } else { 116 };
+        let lg = if row == 0 { 156 } else if row == 1 { 132 } else if row == 2 { 122 } else { 142 };
+        let lb = if row == 0 { 68 } else if row == 1 { 54 } else if row == 2 { 84 } else { 54 };
+
+        for ty in 64 {
+            for tx in 64 {
+                let n1 = hash2(tx, ty, row * 7 + 1) - 128;
+                let n2 = hash2(tx / 2, ty / 2, row * 13 + 3) - 128;
+                // Col 0: textured biome floor (sand ripples / grass blades / alpine stone / desert dunes)
+                var r0 = fr + n1 / 12 + n2 / 14;
+                var g0 = fg + n1 / 12 + n2 / 14;
+                var b0 = fb + n1 / 14 + n2 / 16;
+                if row == 0 || row == 3 {
+                    let wave = sin((tx as f64) * 0.25 + (ty as f64) * 0.45) * 9.0;
+                    r0 += wave as i64; g0 += (wave * 0.8) as i64; b0 += (wave * 0.5) as i64;
+                } else if row == 1 {
+                    if (tx * 7 + ty * 3) % 19 == 0 { g0 += 20; r0 -= 8; }
+                } else {
+                    if n2 > 75 { r0 += 22; g0 += 24; b0 += 28; } // snow flecks
+                }
+                if tx == 0 || ty == 0 { r0 -= 10; g0 -= 10; b0 -= 10; }
+                set_px(px[..], aw, tx, row * 64 + ty, r0, g0, b0, 255);
+
+                // Col 1: chiseled beveled wall block with subtle stone grain + mortar
+                let edge = min(min(tx, 63 - tx), min(ty, 63 - ty));
+                var bv = if tx < 5 || ty < 5 { 28 } else if tx > 58 || ty > 58 { -34 } else { 0 };
+                if edge < 2 { bv = -45; }
+                let crack = if ((tx + ty * 2) % 29 == 0 && n2 > 40) { -22 } else { 0 };
+                set_px(px[..], aw, 64 + tx, row * 64 + ty, wr + bv + n1 / 10 + crack, wg + bv + n1 / 10 + crack, wb + bv + n1 / 10 + crack, 255);
+
+                // Col 2: detailed masonry / timber brick
+                let brow = ty / 16;
+                let bx = (tx + (brow % 2) * 16) % 32;
+                let by = ty % 16;
+                let mortar = bx < 2 || by < 2;
+                let grain = (hash2(tx, ty / 2, row * 19 + 5) - 128) / 9;
+                if mortar {
+                    set_px(px[..], aw, 128 + tx, row * 64 + ty, br - 62, bg - 54, bb - 42, 255);
+                } else {
+                    let bsh = if by < 4 { 18 } else if by > 13 { -20 } else { 0 };
+                    set_px(px[..], aw, 128 + tx, row * 64 + ty, br + bsh + grain, bg + bsh + grain, bb + bsh + grain, 255);
+                }
+
+                // Col 3: leafy brush canopy (transparent edges)
+                let dx = tx - 32;
+                let dy = ty - 32;
+                let d2 = dx * dx + dy * dy;
+                let wob = (hash2(tx / 4, ty / 4, row * 23 + 9) - 128) * 3;
+                if d2 + wob < 860 {
+                    let shade = if d2 < 260 { 22 } else if d2 > 600 { -22 } else { 0 };
+                    let leaf = (hash2(tx / 2, ty / 2, row * 29 + 11) - 128) / 6;
+                    set_px(px[..], aw, 192 + tx, row * 64 + ty, lr + shade + leaf, lg + shade + leaf, lb + shade + leaf, 240);
+                } else {
+                    set_px(px[..], aw, 192 + tx, row * 64 + ty, 0, 0, 0, 0);
+                }
+            }
+        }
+    }
+    // Shared special blocks in Row 3, cols 4..6: steel crate (col 4), gift crate (col 5), grate (col 6)
+    for ty in 64 {
+        for tx in 64 {
+            let n = (hash2(tx, ty, 77) - 128) / 14;
+            // Col 4: brushed steel crate with rivets & X-brace
+            let border = tx < 6 || tx > 57 || ty < 6 || ty > 57;
+            let diag = abs(tx - ty) < 4 || abs(tx - (63 - ty)) < 4;
+            let rivet = (abs(tx - 10) < 3 || abs(tx - 53) < 3) && (abs(ty - 10) < 3 || abs(ty - 53) < 3);
+            var sr = 58 + n; var sg = 78 + n; var sb = 104 + n;
+            if border || diag { sr += 42; sg += 48; sb += 54; }
+            if rivet { sr = 215; sg = 228; sb = 240; }
+            set_px(px[..], aw, 256 + tx, 192 + ty, sr, sg, sb, 255);
+
+            // Col 5: ornate gift box
+            let rib = abs(tx - 32) < 5 || abs(ty - 32) < 5;
+            if rib { set_px(px[..], aw, 320 + tx, 192 + ty, 255, 206 + n, 68, 255); }
+            else { set_px(px[..], aw, 320 + tx, 192 + ty, 134 + n, 68 + n, 186 + n, 255); }
+
+            // Col 6: semi-permeable metallic chain-link grate (transparent openings!)
+            let frame = tx < 5 || tx > 58 || ty < 5 || ty > 58;
+            let mesh = ((tx + ty) % 12 < 2) || ((tx - ty + 128) % 12 < 2);
+            if frame { set_px(px[..], aw, 384 + tx, 192 + ty, 152 + n, 178 + n, 204 + n, 255); }
+            else if mesh { set_px(px[..], aw, 384 + tx, 192 + ty, 184 + n, 212 + n, 236 + n, 220); }
+            else { set_px(px[..], aw, 384 + tx, 192 + ty, 30, 44, 62, 65); }
+        }
+    }
+    let tex = gfx::texture2d(aw, ah);
+    gfx::update_texture(tex, px[..]);
+    return tex;
+}
+
+fn draw_atlas_tile(c: ui::Context, atlas: gfx::Texture, col: i64, row: i64, x: f32, y: f32, t: f32, alpha: i64) {
+    let img = ui::subimage_id(atlas.id, 512, 256, ui::rect((col * 64) as f32, (row * 64) as f32, 64.0, 64.0));
+    ui::draw_image(c, ui::rect(x, y, t, t), img, ui::rgba(255, 255, 255, alpha));
+}
+
+fn map_row(m: Map) -> i64 {
+    match m {
+        Island => { return 0; },
+        Forest => { return 1; },
+        Mountains => { return 2; },
+        Desert => { return 3; },
+    }
+}
+
+// Smooth darkness factor (0.0 = bright day, 1.0 = pitch night) from State.day_phase (0..2399).
+fn night_darkness(s: State&) -> f32 {
+    if s.day_night_on == 0 { return 0.0; }
+    let p = s.day_phase as f32;
+    if p < 900.0 { return 0.0; }
+    if p < 1200.0 { return (p - 900.0) / 300.0; }
+    if p < 2100.0 { return 1.0; }
+    return max(0.0, 1.0 - (p - 2100.0) / 300.0);
+}
 
 fn col(i: i64) -> ui::Color {
     if i == 0 { return ui::rgb(235, 72, 72); }
@@ -2218,25 +2424,68 @@ fn draw_farmer(c: ui::Context, owner: i64, x: f32, y: f32, k: f32, fx: f32, fy: 
     ui::fill_rect(c, ui::rect(x - k * 0.3, y - k * 0.5 + walk, k * 0.6, k * 0.08), 0.0, col(owner));
 }
 
+// Fluffy side-profile sheep (facing left or right); catches fire and blazes with flames when on_fire > 0!
 fn draw_sheep(c: ui::Context, q: Sheep, x: f32, y: f32, t: f32, tm: f32) {
-    let k = t * 0.8;
-    let bob = if q.dir != Dir.None { 0.03 * t * sin(tm * 14.0) } else { 0.0 };
-    let wool = ui::rgb(245, 244, 238);
-    ui::fill_circle(c, ui::rect(x - k * 0.55, y + k * 0.25, k * 1.1, k * 0.35), ui::rgba(0, 0, 0, 100));
-    for l in 2 { ui::fill_rect(c, ui::rect(x - k * 0.26 + l * k * 0.32, y + k * 0.28, k * 0.1, k * 0.2), 2.0, ui::rgb(50, 46, 50)); }
-    ui::fill_circle(c, ui::rect(x - k * 0.5, y - k * 0.42 + bob, k, k * 0.95), ui::rgb(222, 222, 220));
-    for n in 7 {
-        let a: f32 = n as f32 * 0.9;
-        ui::fill_circle(c, ui::rect(x + cos(a) * k * 0.28 - k * 0.2, y + sin(a) * k * 0.26 - k * 0.12 + bob, k * 0.4, k * 0.4), wool);
+    let k = t * 0.84;
+    let fdir: f32 = if q.facing_left != 0 { -1.0 } else { 1.0 };
+    let blazing = q.on_fire > 0;
+    let spd: f32 = if blazing { 26.0 } else { 14.0 };
+    let moving = q.dir != Dir.None || blazing;
+    let bob = if moving { 0.04 * t * abs(sin(tm * spd)) } else { 0.0 };
+    let stride = if moving { sin(tm * spd) * k * 0.1 } else { 0.0 };
+    let wool = if blazing { ui::rgb(255, 206, 152) } else { ui::rgb(248, 246, 240) };
+    let wool_sh = if blazing { ui::rgb(218, 122, 62) } else { ui::rgb(216, 214, 206) };
+    let wool_hi = if blazing { ui::rgb(255, 238, 185) } else { ui::rgb(255, 255, 252) };
+    // Ground shadow
+    ui::fill_circle(c, ui::rect(x - k * 0.56, y + k * 0.28, k * 1.12, k * 0.3), ui::rgba(0, 0, 0, 105));
+    // Four trotting legs (back pair darker, front pair lighter)
+    let leg_dk = ui::rgb(42, 38, 44);
+    let leg_lt = ui::rgb(64, 58, 66);
+    ui::fill_rect(c, ui::rect(x - fdir * k * 0.28 - stride - k * 0.05, y + k * 0.16, k * 0.1, k * 0.3), 3.0, leg_dk);
+    ui::fill_rect(c, ui::rect(x + fdir * k * 0.14 + stride - k * 0.05, y + k * 0.16, k * 0.1, k * 0.3), 3.0, leg_dk);
+    ui::fill_rect(c, ui::rect(x - fdir * k * 0.18 + stride - k * 0.05, y + k * 0.18, k * 0.1, k * 0.3), 3.0, leg_lt);
+    ui::fill_rect(c, ui::rect(x + fdir * k * 0.22 - stride - k * 0.05, y + k * 0.18, k * 0.1, k * 0.3), 3.0, leg_lt);
+    // Fluffy tail puff at rear
+    let tail_x = x - fdir * k * 0.44;
+    let tail_y = y - k * 0.04 - bob;
+    ui::fill_circle(c, ui::rect(tail_x - k * 0.14, tail_y - k * 0.12, k * 0.28, k * 0.24), wool_sh);
+    ui::fill_circle(c, ui::rect(tail_x - k * 0.11, tail_y - k * 0.13, k * 0.22, k * 0.2), wool);
+    // Scalloped fluffy wool cloud body (profile oval + layered wool puffs)
+    ui::fill_circle(c, ui::rect(x - k * 0.46, y - k * 0.34 - bob, k * 0.88, k * 0.64), wool_sh);
+    ui::fill_circle(c, ui::rect(x - k * 0.44, y - k * 0.36 - bob, k * 0.42, k * 0.38), wool);
+    ui::fill_circle(c, ui::rect(x - k * 0.2, y - k * 0.46 - bob, k * 0.44, k * 0.42), wool);
+    ui::fill_circle(c, ui::rect(x + k * 0.04, y - k * 0.38 - bob, k * 0.42, k * 0.38), wool);
+    ui::fill_circle(c, ui::rect(x - k * 0.34, y - k * 0.16 - bob, k * 0.38, k * 0.34), wool);
+    ui::fill_circle(c, ui::rect(x - k * 0.06, y - k * 0.14 - bob, k * 0.4, k * 0.34), wool);
+    ui::fill_circle(c, ui::rect(x - k * 0.24, y - k * 0.42 - bob, k * 0.36, k * 0.28), wool_hi);
+    ui::fill_circle(c, ui::rect(x - k * 0.02, y - k * 0.36 - bob, k * 0.32, k * 0.24), wool_hi);
+    // Side-profile head & floppy ear
+    let hx = x + fdir * k * 0.38;
+    let hy = y - k * 0.14 - bob;
+    ui::fill_circle(c, ui::rect(hx - k * 0.22, hy - k * 0.18, k * 0.44, k * 0.38), ui::rgb(58, 54, 62));
+    ui::fill_circle(c, ui::rect(hx + fdir * k * 0.1 - k * 0.12, hy + k * 0.01, k * 0.24, k * 0.18), ui::rgb(82, 76, 86));
+    // Floppy hanging ear on side of head
+    let ear_x = hx - fdir * k * 0.12;
+    ui::fill_circle(c, ui::rect(ear_x - k * 0.1, hy - k * 0.08, k * 0.2, k * 0.24), ui::rgb(44, 40, 48));
+    // Fluffy wool crown puff on head
+    ui::fill_circle(c, ui::rect(hx - fdir * k * 0.06 - k * 0.16, hy - k * 0.28, k * 0.32, k * 0.22), wool_hi);
+    // Expressive side-profile eye
+    let ex = hx + fdir * k * 0.08;
+    let ey = hy - k * 0.04;
+    if blazing {
+        ui::fill_circle(c, ui::rect(ex - k * 0.08, ey - k * 0.08, k * 0.16, k * 0.16), ui::rgb(255, 235, 70));
+        ui::fill_circle(c, ui::rect(ex - k * 0.03, ey - k * 0.03, k * 0.06, k * 0.06), ui::rgb(180, 20, 10));
+        // Blazing flames dancing off the sheep's wool!
+        for fl in 4 {
+            let fx = x + ((fl as f32) - 1.5) * k * 0.22;
+            let fh = k * (0.36 + 0.14 * sin(tm * 28.0 + (fl as f32) * 1.7));
+            ui::fill_triangle(c, fx, y - k * 0.36 - bob - fh, fx + k * 0.16, y - k * 0.24 - bob, fx - k * 0.16, y - k * 0.24 - bob, ui::rgba(255, 95, 20, 225));
+            ui::fill_triangle(c, fx, y - k * 0.34 - bob - fh * 0.65, fx + k * 0.09, y - k * 0.24 - bob, fx - k * 0.09, y - k * 0.24 - bob, ui::rgb(255, 235, 95));
+        }
+    } else {
+        ui::fill_circle(c, ui::rect(ex - k * 0.06, ey - k * 0.06, k * 0.12, k * 0.12), ui::rgb(255, 255, 255));
+        ui::fill_circle(c, ui::rect(ex + fdir * k * 0.02 - k * 0.03, ey - k * 0.03, k * 0.06, k * 0.06), ui::rgb(20, 18, 24));
     }
-    ui::fill_circle(c, ui::rect(x - k * 0.34, y - k * 0.34 + bob, k * 0.68, k * 0.72), wool);
-    ui::fill_rect(c, ui::rect(x - k * 0.17, y - k * 0.18 + bob, k * 0.34, k * 0.46), k * 0.15, ui::rgb(62, 60, 66));
-    ui::fill_circle(c, ui::rect(x - k * 0.1, y + k * 0.14 + bob, k * 0.2, k * 0.12), ui::rgb(100, 98, 106));
-    ui::fill_circle(c, ui::rect(x - k * 0.11, y - k * 0.08 + bob, k * 0.06, k * 0.06), ui::rgb(255, 255, 255));
-    ui::fill_circle(c, ui::rect(x + k * 0.05, y - k * 0.08 + bob, k * 0.06, k * 0.06), ui::rgb(255, 255, 255));
-    ui::fill_rect(c, ui::rect(x - k * 0.34, y - k * 0.14 + bob, k * 0.2, k * 0.06), 2.0, ui::rgb(40, 38, 44));
-    ui::fill_rect(c, ui::rect(x + k * 0.14, y - k * 0.14 + bob, k * 0.2, k * 0.06), 2.0, ui::rgb(40, 38, 44));
-    ui::fill_circle(c, ui::rect(x - k * 0.2, y - k * 0.32 + bob, k * 0.4, k * 0.26), wool);
 }
 
 fn draw_bomb(c: ui::Context, s: State&, b: Bomb, ox: f32, oy: f32, t: f32, tm: f32) {
@@ -2503,33 +2752,45 @@ fn draw_portal(c: ui::Context, idx: i64, x: f32, y: f32, t: f32, tm: f32) {
     }
 }
 
-// Reincarnated dead player as a controllable blocking Black Sheep.
+// Reincarnated dead player as a fluffy side-profile blocking Black Sheep.
 fn draw_black_sheep(c: ui::Context, s: State&, i: i64, x: f32, y: f32, t: f32, tm: f32) {
-    let k = t * 0.8;
+    let k = t * 0.84;
     let bits = s.players[i].bits;
-    let bob = if (bits & 15) != 0 { 0.04 * t * sin(tm * 18.0) } else { 0.0 };
-    let wool = ui::rgb(34, 34, 42);
-    let hi = ui::rgb(58, 58, 70);
-    ui::fill_circle(c, ui::rect(x - k * 0.55, y + k * 0.25, k * 1.1, k * 0.35), ui::rgba(0, 0, 0, 110));
-    for l in 2 { ui::fill_rect(c, ui::rect(x - k * 0.26 + l * k * 0.32, y + k * 0.28, k * 0.1, k * 0.2), 2.0, ui::rgb(22, 20, 26)); }
-    ui::fill_circle(c, ui::rect(x - k * 0.5, y - k * 0.42 + bob, k, k * 0.95), ui::rgb(20, 20, 26));
-    for n in 7 {
-        let a: f32 = n as f32 * 0.9;
-        ui::fill_circle(c, ui::rect(x + cos(a) * k * 0.28 - k * 0.2, y + sin(a) * k * 0.26 - k * 0.12 + bob, k * 0.4, k * 0.4), wool);
-    }
-    ui::fill_circle(c, ui::rect(x - k * 0.34, y - k * 0.34 + bob, k * 0.68, k * 0.72), hi);
-    ui::stroke_circle(c, ui::rect(x - k * 0.46, y - k * 0.42 + bob, k * 0.92, k * 0.9), 2.5, col(i));
-    ui::fill_rect(c, ui::rect(x - k * 0.17, y - k * 0.18 + bob, k * 0.34, k * 0.46), k * 0.15, ui::rgb(26, 24, 32));
-    // Mischievous glowing yellow eyes
-    ui::fill_circle(c, ui::rect(x - k * 0.12, y - k * 0.08 + bob, k * 0.08, k * 0.08), ui::rgb(255, 225, 65));
-    ui::fill_circle(c, ui::rect(x + k * 0.04, y - k * 0.08 + bob, k * 0.08, k * 0.08), ui::rgb(255, 225, 65));
-    ui::fill_rect(c, ui::rect(x - k * 0.34, y - k * 0.14 + bob, k * 0.2, k * 0.06), 2.0, ui::rgb(18, 16, 22));
-    ui::fill_rect(c, ui::rect(x + k * 0.14, y - k * 0.14 + bob, k * 0.2, k * 0.06), 2.0, ui::rgb(18, 16, 22));
-    marker(c, i, x, y - k * 0.72 + bob, t * 0.12);
+    let fdir: f32 = if s.players[i].facing == Dir.Left { -1.0 } else { 1.0 };
+    let moving = (bits & 15) != 0;
+    let bob = if moving { 0.04 * t * abs(sin(tm * 18.0)) } else { 0.0 };
+    let stride = if moving { sin(tm * 18.0) * k * 0.1 } else { 0.0 };
+    let wool = ui::rgb(40, 40, 50);
+    let wool_sh = ui::rgb(22, 22, 28);
+    let wool_hi = ui::rgb(64, 64, 78);
+    ui::fill_circle(c, ui::rect(x - k * 0.56, y + k * 0.28, k * 1.12, k * 0.3), ui::rgba(0, 0, 0, 115));
+    ui::fill_rect(c, ui::rect(x - fdir * k * 0.26 - stride - k * 0.05, y + k * 0.16, k * 0.1, k * 0.3), 3.0, ui::rgb(18, 16, 22));
+    ui::fill_rect(c, ui::rect(x + fdir * k * 0.16 + stride - k * 0.05, y + k * 0.16, k * 0.1, k * 0.3), 3.0, ui::rgb(18, 16, 22));
+    ui::fill_rect(c, ui::rect(x - fdir * k * 0.16 + stride - k * 0.05, y + k * 0.18, k * 0.1, k * 0.3), 3.0, ui::rgb(30, 28, 36));
+    ui::fill_rect(c, ui::rect(x + fdir * k * 0.24 - stride - k * 0.05, y + k * 0.18, k * 0.1, k * 0.3), 3.0, ui::rgb(30, 28, 36));
+    // Fluffy black tail
+    ui::fill_circle(c, ui::rect(x - fdir * k * 0.44 - k * 0.12, y - k * 0.16 - bob, k * 0.24, k * 0.22), wool);
+    // Scalloped dark wool body
+    ui::fill_circle(c, ui::rect(x - k * 0.46, y - k * 0.34 - bob, k * 0.88, k * 0.64), wool_sh);
+    ui::fill_circle(c, ui::rect(x - k * 0.44, y - k * 0.36 - bob, k * 0.42, k * 0.38), wool);
+    ui::fill_circle(c, ui::rect(x - k * 0.2, y - k * 0.46 - bob, k * 0.44, k * 0.42), wool);
+    ui::fill_circle(c, ui::rect(x + k * 0.04, y - k * 0.38 - bob, k * 0.42, k * 0.38), wool);
+    ui::fill_circle(c, ui::rect(x - k * 0.34, y - k * 0.16 - bob, k * 0.38, k * 0.34), wool);
+    ui::fill_circle(c, ui::rect(x - k * 0.06, y - k * 0.14 - bob, k * 0.4, k * 0.34), wool);
+    ui::fill_circle(c, ui::rect(x - k * 0.24, y - k * 0.42 - bob, k * 0.36, k * 0.28), wool_hi);
+    ui::stroke_circle(c, ui::rect(x - k * 0.46, y - k * 0.42 - bob, k * 0.92, k * 0.78), 2.5, col(i));
+    // Profile head + floppy ear + glowing yellow eye
+    let hx = x + fdir * k * 0.38;
+    let hy = y - k * 0.14 - bob;
+    ui::fill_circle(c, ui::rect(hx - k * 0.22, hy - k * 0.18, k * 0.44, k * 0.38), ui::rgb(26, 24, 34));
+    ui::fill_circle(c, ui::rect(hx - fdir * k * 0.12 - k * 0.1, hy - k * 0.08, k * 0.2, k * 0.24), ui::rgb(18, 16, 24));
+    ui::fill_circle(c, ui::rect(hx - fdir * k * 0.06 - k * 0.16, hy - k * 0.28, k * 0.32, k * 0.22), wool_hi);
+    ui::fill_circle(c, ui::rect(hx + fdir * k * 0.08 - k * 0.06, hy - k * 0.09, k * 0.12, k * 0.12), ui::rgb(255, 225, 65));
+    marker(c, i, x, y - k * 0.74 - bob, t * 0.12);
     if s.players[i].name.len > 0 {
         let nw = ui::text_width(ui::font(c), s.players[i].name[..]);
-        ui::fill_rect(c, ui::rect(x - nw * 0.5 - 6.0, y + k * 0.44, nw + 12.0, 28.0), 5.0, ui::rgba(10, 12, 20, 175));
-        text(c, x - nw * 0.5, y + k * 0.44, s.players[i].name[..], ui::rgb(210, 210, 220));
+        ui::fill_rect(c, ui::rect(x - nw * 0.5 - 6.0, y + k * 0.46, nw + 12.0, 28.0), 5.0, ui::rgba(10, 12, 20, 175));
+        text(c, x - nw * 0.5, y + k * 0.46, s.players[i].name[..], ui::rgb(210, 210, 220));
     }
 }
 
@@ -2570,7 +2831,7 @@ fn draw_fog(c: ui::Context, g: u8, x: f32, y: f32, t: f32, tm: f32, viewer_ghost
     ui::fill_circle(c, ui::rect(x + t * 0.72 - r * 0.55 + drift * 0.6, y + t * 0.68 - r * 0.55, r * 1.1, r * 1.1), ui::rgba(164, 178, 198, a));
 }
 
-fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&, mode: const u8[:], sc: f32) {
+fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&, mode: const u8[:], sc: f32, atlas: gfx::Texture, detailed_tex: bool) {
     let size = gfx::screen_size();
     let vw = (size.x as f32) / sc;
     let vh = (size.y as f32) / sc;
@@ -2580,6 +2841,7 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
     let ox = (vw - t * W) / 2.0 + fx.shake * sin(tm * 90.0);
     let oy = top + fx.shake * cos(tm * 77.0);
     fx.shake *= 0.88;
+    let mrow = map_row(s.map);
     if ui::begin(hud, "G", ui::rect(0, 0, vw, vh), ui::WINDOW_NO_INPUT | ui::WINDOW_NO_SCROLLBAR) {
         ui::fill_rect(hud, ui::rect(ox - 8.0, oy - 8.0, t * W + 16.0, t * H + 16.0), 10.0, map_border_color(s.map));
         for ty in H {
@@ -2587,14 +2849,25 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
                 let g = s.grid[ty * W + tx];
                 let x = ox + tx * t;
                 let y = oy + ty * t;
-                draw_floor(hud, s.map, tx, ty, x, y, t);
-                if g == 1 { draw_wall(hud, s.map, x, y, t); }
-                else if g == 2 { draw_brick(hud, s.map, x, y, t); }
-                else if g == 6 { draw_steel(hud, x, y, t); }
-                else if g == 7 { draw_gift(hud, x, y, t, tm); }
-                else if g == TILE_GRATE { draw_grate(hud, x, y, t); }
-                else if is_power(g) { draw_power(hud, g, x, y, t, tm); }
-                else if is_flame(g) { draw_flame(hud, g, x, y, t, tm); }
+                if detailed_tex {
+                    draw_atlas_tile(hud, atlas, 0, mrow, x, y, t, 255);
+                    if g == 1 { draw_atlas_tile(hud, atlas, 1, mrow, x, y, t, 255); }
+                    else if g == 2 { draw_atlas_tile(hud, atlas, 2, mrow, x, y, t, 255); }
+                    else if g == 6 { draw_atlas_tile(hud, atlas, 4, 3, x, y, t, 255); }
+                    else if g == 7 { draw_atlas_tile(hud, atlas, 5, 3, x, y, t, 255); }
+                    else if g == TILE_GRATE { draw_atlas_tile(hud, atlas, 6, 3, x, y, t, 255); }
+                    else if is_power(g) { draw_power(hud, g, x, y, t, tm); }
+                    else if is_flame(g) { draw_flame(hud, g, x, y, t, tm); }
+                } else {
+                    draw_floor(hud, s.map, tx, ty, x, y, t);
+                    if g == 1 { draw_wall(hud, s.map, x, y, t); }
+                    else if g == 2 { draw_brick(hud, s.map, x, y, t); }
+                    else if g == 6 { draw_steel(hud, x, y, t); }
+                    else if g == 7 { draw_gift(hud, x, y, t, tm); }
+                    else if g == TILE_GRATE { draw_grate(hud, x, y, t); }
+                    else if is_power(g) { draw_power(hud, g, x, y, t, tm); }
+                    else if is_flame(g) { draw_flame(hud, g, x, y, t, tm); }
+                }
             }
         }
         draw_fences(hud, s, ox, oy, t);
@@ -2632,7 +2905,11 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
             for tx in W {
                 if s.grid[ty * W + tx] == TILE_BRUSH {
                     let inside = s.players[s.you].life == Life.Alive && tx == my_tx && ty == my_ty;
-                    draw_brush(hud, s.map, ox + tx * t, oy + ty * t, t, tm, inside);
+                    if detailed_tex {
+                        draw_atlas_tile(hud, atlas, 3, mrow, ox + tx * t, oy + ty * t, t, if inside { 145 } else { 245 });
+                    } else {
+                        draw_brush(hud, s.map, ox + tx * t, oy + ty * t, t, tm, inside);
+                    }
                 }
             }
         }
@@ -2652,6 +2929,57 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
         for i in 4 {
             if s.players[i].life == Life.FogGhost {
                 draw_fog_ghost(hud, s, i, ox + shown[i].x / TILE * t, oy + shown[i].y / TILE * t, t, tm);
+            }
+        }
+        // Day/Night cycle overlay: at night, blocks and bombs vanish into darkness — only glowing eyes & fire flashes show!
+        let dark = night_darkness(s);
+        if dark > 0.02 && mode != "lobby" && s.over == 0 {
+            let da = min(253, (dark * 253.0) as i64);
+            ui::fill_rect(hud, ui::rect(ox - 8.0, oy - 8.0, t * W + 16.0, t * H + 16.0), 10.0, ui::rgba(3, 5, 14, da));
+            // Active flames, fireballs, and flaming sheep pierce the night darkness!
+            if dark > 0.25 {
+                for ty in H {
+                    for tx in W {
+                        let g = s.grid[ty * W + tx];
+                        if is_flame(g) {
+                            let gx = ox + tx * t;
+                            let gy = oy + ty * t;
+                            ui::fill_circle(hud, ui::rect(gx - t * 0.35, gy - t * 0.35, t * 1.7, t * 1.7), ui::rgba(255, 140, 40, (dark * 55.0) as i64));
+                            draw_flame(hud, g, gx, gy, t, tm);
+                        }
+                    }
+                }
+                for fb in s.fireballs { draw_fireball(hud, fb, ox, oy, t, tm); }
+                for k in 2 {
+                    if s.sheep[k].alive != 0 && s.sheep[k].on_fire > 0 {
+                        let sx = ox + (s.sheep[k].x as f32) / TILE * t;
+                        let sy = oy + (s.sheep[k].y as f32) / TILE * t;
+                        ui::fill_circle(hud, ui::rect(sx - t * 0.7, sy - t * 0.7, t * 1.4, t * 1.4), ui::rgba(255, 120, 30, 85));
+                        draw_sheep(hud, s.sheep[k], sx, sy, t, tm);
+                    }
+                }
+                // Only glowing player eyes are visible in the pitch dark!
+                let ea = min(255, ((dark - 0.25) / 0.75 * 255.0) as i64);
+                for i in 4 {
+                    let pl = s.players[i];
+                    if pl.life == Life.Off { continue; }
+                    if pl.life == Life.Alive && pl.ghost > 0 && i != s.you { continue; }
+                    let ptx = pl.x / TILE;
+                    let pty = pl.y / TILE;
+                    if pl.life == Life.Alive && ptx >= 0 && ptx < W && pty >= 0 && pty < H && s.grid[pty * W + ptx] == TILE_BRUSH && i != s.you { continue; }
+                    let px = ox + shown[i].x / TILE * t;
+                    let py = oy + shown[i].y / TILE * t - t * 0.12;
+                    let lx: f32 = dir_dx(pl.facing) * t * 0.05;
+                    let ly: f32 = dir_dy(pl.facing) * t * 0.04;
+                    let eye_col = if pl.life == Life.FogGhost { ui::rgba(45, 240, 255, ea) }
+                                  else if pl.life == Life.BlackSheep { ui::rgba(255, 225, 65, ea) }
+                                  else if i == s.you { ui::rgba(255, 248, 210, ea) }
+                                  else { ui::rgba(255, 195, 95, ea) };
+                    ui::fill_circle(hud, ui::rect(px - t * 0.14 + lx, py - t * 0.06 + ly, t * 0.11, t * 0.13), eye_col);
+                    ui::fill_circle(hud, ui::rect(px + t * 0.03 + lx, py - t * 0.06 + ly, t * 0.11, t * 0.13), eye_col);
+                    ui::fill_circle(hud, ui::rect(px - t * 0.105 + lx * 1.3, py - t * 0.02 + ly * 1.3, t * 0.045, t * 0.055), ui::rgba(15, 15, 22, ea));
+                    ui::fill_circle(hud, ui::rect(px + t * 0.065 + lx * 1.3, py - t * 0.02 + ly * 1.3, t * 0.045, t * 0.055), ui::rgba(15, 15, 22, ea));
+                }
             }
         }
         // Bottom status strip for active power-ups or post-death controls
@@ -3071,6 +3399,9 @@ fn main() {
     guard gfx::open("Bomberman", 960, 720, gfx::WINDOW_RESIZABLE) else { abort(str("gfx: ", gfx::error())); }
     audio::open();
     let sfx = make_sfx(r);
+    let night_snd = make_night_sfx(r);
+    let atlas = make_tile_atlas();
+    var detailed_tex = false;
     // Your own music: put a 16-bit PCM WAV named music.wav next to the game and it plays instead of the chiptune.
     var wav: u8[>..] = [];
     var pcm: f32[>..] = [];
@@ -3082,6 +3413,7 @@ fn main() {
     var track = 0;
     var last_map = s.map;
     var tune = if own { audio::play(audio::create_sound(pcm, info[0], info[1]), mvol, 0.0, 1.0, true) } else { audio::play(songs[track], mvol, 0.0, 1.0, true) };
+    let night_voice = audio::play(night_snd, 0.0, 0.0, 1.0, true);
     var muted = false;
     let hud = overlay(28.0);
     let big = overlay(104.0);
@@ -3184,6 +3516,9 @@ fn main() {
             tune = audio::play(songs[track], if muted { 0.0 } else { mvol }, 0.0, 1.0, true);
         }
         if !typing && gfx::key_pressed("M") { muted = !muted; audio::set_voice(tune, if muted { 0.0 } else { mvol }, 0.0, 1.0); }
+        if !typing && gfx::key_pressed("T") { detailed_tex = !detailed_tex; }
+        let ndark = night_darkness(s);
+        audio::set_voice(night_voice, if muted || mode == GameMode.Lobby { 0.0 } else { ndark * 0.45 }, 0.0, 1.0);
         ui::input_from_gfx(hud);
         ui::input_from_gfx(big);
         ui::input_from_gfx(panel);
@@ -3501,7 +3836,7 @@ fn main() {
             Host => "host",
             Join => if use_udp && udp_rx_age < 45 { "udp" } else { "join" },
         };
-        draw(hud, big, s, shown, fx, draw_mode, sc);
+        draw(hud, big, s, shown, fx, draw_mode, sc, atlas, detailed_tex);
         let sz = gfx::screen_size();
         let vw = (sz.x as f32) / sc;
         let vh = (sz.y as f32) / sc;
@@ -3780,6 +4115,13 @@ fn main() {
                         s.grid[(s.portals[3] as i64) * W + (s.portals[2] as i64)] = 0;
                     }
                 }
+                ui::layout_row_dynamic(menu, 30.0, 2);
+                var dn_on = s.day_night_on != 0;
+                if ui::checkbox_label(menu, "Day/Night Cycle", dn_on) {
+                    s.day_night_on = if dn_on { 1 } else { 0 };
+                    if s.day_night_on == 0 { s.day_phase = 0; }
+                }
+                ui::checkbox_label(menu, "Detailed Textures (T)", detailed_tex);
                 var nm: u32 = 0;
                 if p0 { nm |= PWR_FLAME; }
                 if p1 { nm |= PWR_BOMB; }
@@ -3808,7 +4150,7 @@ fn main() {
         }
         if menu_open && mode != GameMode.Lobby {
             let mw: f32 = min(560.0, vw - 24.0);
-            let mh: f32 = min(390.0, vh - 24.0);
+            let mh: f32 = min(430.0, vh - 24.0);
             if ui::begin(menu, "Player Setup", ui::rect((vw - mw) * 0.5, (vh - mh) * 0.5, mw, mh), ui::WINDOW_BORDER | ui::WINDOW_TITLE | ui::WINDOW_NO_SCROLLBAR) {
                 ui::layout_row_dynamic(menu, 28.0, 1);
                 ui::label(menu, "Your Name (max 12 chars):", ui::TEXT_LEFT);
@@ -3827,6 +4169,8 @@ fn main() {
                 if ui::option_label(menu, "Pig (Bacon)", my_kind == Character.Pig) { my_kind = Character.Pig; }
                 if ui::option_label(menu, "Farmer (Hay Bales)", my_kind == Character.Farmer) { my_kind = Character.Farmer; }
                 let changed = my_kind != prev_kind;
+                ui::layout_row_dynamic(menu, 30.0, 1);
+                ui::checkbox_label(menu, "Detailed Textured Graphics (hotkey T)", detailed_tex);
                 ui::layout_row_dynamic(menu, 42.0, 1);
                 let done = ui::button_label(menu, "Play!") || (ed & ui::EDIT_COMMITTED) != 0;
                 if mode == GameMode.Join {
@@ -3866,6 +4210,7 @@ fn main() {
     ui::destroy(big);
     ui::destroy(panel);
     ui::destroy(menu);
+    gfx::release(atlas);
     audio::close();
     gfx::close();
 }
