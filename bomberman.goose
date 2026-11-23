@@ -27,6 +27,8 @@ let RIGHT = 8;
 let BOMB = 16;
 let HOLD = 32;               // stand your ground: you can't move, and others can't walk through you
 let MINE_KEY = 64;           // E / X drops a proximity mine (Shift+Space also works)
+let BUILD_KEY = 128;         // Q places a brick ahead; Shift+Q places a permanent chain-link fence on the tile edge
+let FIRE_KEY = 256;          // F fires active weapon (flamethrower / fireball)
 let SLIDE = 5;               // ticks a kicked bomb takes per tile
 let GHOST = 600;             // ghost power-up length in ticks
 let NAPALM = 480;            // napalm trail length in ticks
@@ -122,29 +124,37 @@ fn dir_from_int(v: i64) -> Dir {
 
 // Tile values: 0 empty, 1 wall, 2 brick, 3 range+, 4 bomb+, 5 speed+, 6 steel crate (two hits), 7 gift crate (always drops),
 // 8 ghost, 9 kick, 10 missile, 11 napalm, 12 mines, 13 drunk, 14 bad/curse, 15 unkickable bombs,
-// 16..31 flame, 32..47 flame over brick, 48..63 flame over gift, 64..95 slow-decaying napalm flame, 96..127 fog cloud.
+// 16..31 flame, 32..47 flame over brick, 48..63 flame over gift, 64..95 slow-decaying napalm flame, 96..127 fog cloud,
+// 128 brush/forest (walkable, hides players, burns away), 129 semi-permeable grate (blocks players, lets bombs & flames pass),
+// 130 builder kit power-up.
 
-let PWR_FLAME: u16 = 1;
-let PWR_BOMB: u16 = 2;
-let PWR_SPEED: u16 = 4;
-let PWR_GHOST: u16 = 8;
-let PWR_KICK: u16 = 16;
-let PWR_MISSILE: u16 = 32;
-let PWR_NAPALM: u16 = 64;
-let PWR_MINES: u16 = 128;
-let PWR_DRUNK: u16 = 256;
-let PWR_BAD: u16 = 512;
-let PWR_UNKICK: u16 = 1024;
-let PWR_CLASSIC: u16 = 31;
-let PWR_ALL: u16 = 2047;
+let TILE_BRUSH: u8 = 128;
+let TILE_GRATE: u8 = 129;
+let TILE_PWR_BUILD: u8 = 130;
 
-fn is_power(g: u8) -> bool { (g >= 3 && g <= 5) || (g >= 8 && g <= 15) }
+let PWR_FLAME: u32 = 1;
+let PWR_BOMB: u32 = 2;
+let PWR_SPEED: u32 = 4;
+let PWR_GHOST: u32 = 8;
+let PWR_KICK: u32 = 16;
+let PWR_MISSILE: u32 = 32;
+let PWR_NAPALM: u32 = 64;
+let PWR_MINES: u32 = 128;
+let PWR_DRUNK: u32 = 256;
+let PWR_BAD: u32 = 512;
+let PWR_UNKICK: u32 = 1024;
+let PWR_BUILD: u32 = 2048;
+let PWR_CLASSIC: u32 = 31;
+let PWR_ALL: u32 = 4095;
+
+fn is_power(g: u8) -> bool { (g >= 3 && g <= 5) || (g >= 8 && g <= 15) || (g >= 130 && g <= 135) }
 fn is_flame(g: u8) -> bool { g >= 16 && g < 96 }
-fn is_fog(g: u8) -> bool { g >= 96 }
-fn is_solid(g: u8) -> bool { g == 1 || g == 2 || g == 6 || g == 7 }
+fn is_fog(g: u8) -> bool { g >= 96 && g < 128 }
+fn is_solid(g: u8) -> bool { g == 1 || g == 2 || g == 6 || g == 7 || g == TILE_GRATE }
+fn is_solid_bomb(g: u8) -> bool { g == 1 || g == 2 || g == 6 || g == 7 }
 
-fn pick_power(mask: u16, r: rng&) -> u8 {
-    var opts: u8[..16] = [];
+fn pick_power(mask: u32, r: rng&) -> u8 {
+    var opts: u8[..20] = [];
     if (mask & PWR_FLAME) != 0 { opts.push(3); }
     if (mask & PWR_BOMB) != 0 { opts.push(4); }
     if (mask & PWR_SPEED) != 0 { opts.push(5); }
@@ -156,12 +166,13 @@ fn pick_power(mask: u16, r: rng&) -> u8 {
     if (mask & PWR_DRUNK) != 0 { opts.push(13); }
     if (mask & PWR_BAD) != 0 { opts.push(14); }
     if (mask & PWR_UNKICK) != 0 { opts.push(15); }
+    if (mask & PWR_BUILD) != 0 { opts.push(TILE_PWR_BUILD); }
     if opts.len == 0 { return 0; }
     return opts[r.rand_int(opts.len)];
 }
 
 let ROBOTO: const u8[:] = embed_file("Roboto-Regular.ttf");
-struct Player { x: i64, y: i64, life: Life, portal_cd: u8, bombs: u8, range: u8, speed: u8, slow: u8, wins: u8, streak: u8, bits: u8, held: u8, mine_held: u8, placed: u8, ghost: u16, napalm: u16, drunk: u16, kick: u8, unkick: u8, mines: u8, missiles: u8, kind: Character, name: u8[..12] }
+struct Player { x: i64, y: i64, life: Life, facing: Dir, portal_cd: u8, bombs: u8, range: u8, speed: u8, slow: u8, wins: u8, streak: u8, bits: u16, held: u8, mine_held: u8, build_held: u8, placed: u8, ghost: u16, napalm: u16, drunk: u16, kick: u8, unkick: u8, mines: u8, missiles: u8, builds: u8, kind: Character, name: u8[..12] }
 // dir: None when still, otherwise slides; m: ticks since its last step; flags: bit 0 = unkickable, bit 1 = warped; fire_lvl: 1..15 flame linger.
 struct Bomb { x: u8, y: u8, t: u16, range: u8, owner: u8, dir: Dir, m: u8, flags: u8, fire_lvl: u8 }
 // Proximity mine: arms down to 0, then explodes when stepped on or blasted.
@@ -170,7 +181,8 @@ struct Mine { x: u8, y: u8, owner: u8, arm: u8 }
 struct Missile { x: i32, y: i32, active: u8, dir: Dir, portal_cd: u8, t: u16 }
 // A sheep wanders at random and blocks the way like a movable block. dir: None when grazing.
 struct Sheep { x: i64, y: i64, alive: u8, dir: Dir, t: u8, portal_cd: u8 }
-struct State { grid: u8[195], players: Player[4], bombs: Bomb[..16], mines: Mine[..8], missiles: Missile[4], sheep: Sheep[2], drops: u8, regrow: u8, map: Map, portals_on: u8, portals: u8[4], power_mask: u16, fuse_ticks: u16, fuse_rand: u8, fire_ticks: u8, fire_rand: u8, fire_range: u8, range_rand: u8, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
+// fences: 2 bits per tile packed into 49 bytes (bit 0 = right edge, bit 1 = bottom edge); permanent boundary barriers.
+struct State { grid: u8[195], fences: u8[49], players: Player[4], bombs: Bomb[..16], mines: Mine[..8], missiles: Missile[4], sheep: Sheep[2], drops: u8, regrow: u8, map: Map, portals_on: u8, portals: u8[4], power_mask: u32, fuse_ticks: u16, fuse_rand: u8, fire_ticks: u8, fire_rand: u8, fire_range: u8, range_rand: u8, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
 
 // UDP (udp.c): inputs and snapshots fly as datagrams when a client joins with `udp`; the WebSocket stays up for
 // joining, leaving and a slow heartbeat. Each snapshot carries its tick, so stale or reordered ones are dropped.
@@ -188,11 +200,11 @@ extern fn upnp_unmap(port: i64) -> i64;
 // Host: input, profile update, or disconnect from a connection (reply names it). Client: key bits or profile to send.
 // seq numbers a client's input steps; the host echoes the latest one it has seen in State.ack.
 enum Msg {
-    Input { reply: http::MailAddress, bits: u8, seq: i64 },
+    Input { reply: http::MailAddress, bits: u16, seq: i64 },
     Profile { reply: http::MailAddress, kind: Character, name: u8[..12] },
     Leave { reply: http::MailAddress },
 }
-struct Pad { bits: u8, seq: i64 }
+struct Pad { bits: u16, seq: i64 }
 struct Profile { kind: Character, name: u8[..12] }
 struct Lost { code: i64 }
 struct UpnpReq { port: i64, enable: bool }
@@ -230,15 +242,49 @@ fn portal_dest(s: State&, tx: i64, ty: i64) -> int2 {
 
 fn hits(ax: i64, ay: i64, bx: i64, by: i64) -> bool { return abs(ax - bx) < 2 * HB && abs(ay - by) < 2 * HB; }
 
-// Does a box centered at x y hit a wall, block, or a bomb that the box (now at ox oy) is not already standing on?
+fn fence_get(s: State&, tx: i64, ty: i64, bit: i64) -> bool {
+    if tx < 0 || tx >= W || ty < 0 || ty >= H { return false; }
+    let idx = (ty * W + tx) * 2 + bit;
+    return (s.fences[idx / 8] & ((1 << (idx & 7)) as u8)) != 0;
+}
+
+fn fence_set(s: State&, tx: i64, ty: i64, bit: i64) {
+    if tx < 0 || tx >= W || ty < 0 || ty >= H { return; }
+    let idx = (ty * W + tx) * 2 + bit;
+    s.fences[idx / 8] |= (1 << (idx & 7)) as u8;
+}
+
+fn fence_between(s: State&, ax: i64, ay: i64, bx: i64, by: i64) -> bool {
+    if bx == ax + 1 && by == ay { return fence_get(s, ax, ay, 0); }
+    if bx == ax - 1 && by == ay { return fence_get(s, bx, ay, 0); }
+    if by == ay + 1 && bx == ax { return fence_get(s, ax, ay, 1); }
+    if by == ay - 1 && bx == ax { return fence_get(s, ax, by, 1); }
+    return false;
+}
+
+// Does a box centered at x y hit a wall, block, boundary fence, or a bomb that the box (now at ox oy) is not already standing on?
 fn tiles_blocked(s: State&, ox: i64, oy: i64, x: i64, y: i64) -> bool {
-    for ty in (y - HB) / TILE..(y + HB - 1) / TILE + 1 {
-        for tx in (x - HB) / TILE..(x + HB - 1) / TILE + 1 {
+    let x0 = (x - HB) / TILE;
+    let x1 = (x + HB - 1) / TILE;
+    let y0 = (y - HB) / TILE;
+    let y1 = (y + HB - 1) / TILE;
+    for ty in y0..y1 + 1 {
+        for tx in x0..x1 + 1 {
             let g = s.grid[ty * W + tx];
             if is_solid(g) { return true; }
             let on_it = tx >= (ox - HB) / TILE && tx <= (ox + HB - 1) / TILE &&
                         ty >= (oy - HB) / TILE && ty <= (oy + HB - 1) / TILE;
             if bomb_at(s, tx, ty) >= 0 && !on_it { return true; }
+        }
+    }
+    if x1 > x0 {
+        for ty in y0..y1 + 1 {
+            if fence_get(s, x0, ty, 0) { return true; }
+        }
+    }
+    if y1 > y0 {
+        for tx in x0..x1 + 1 {
+            if fence_get(s, tx, y0, 1) { return true; }
         }
     }
     return false;
@@ -291,6 +337,7 @@ fn sheep_blocked(s: State&, k: i64, x: i64, y: i64) -> bool {
 }
 
 fn reset_round(s: State&, r: rng&) {
+    for fi in 49 { s.fences[fi] = 0; }
     for ty in H {
         for tx in W {
             var g: u8 = 0;
@@ -313,11 +360,20 @@ fn reset_round(s: State&, r: rng&) {
             if is_border || is_pillar { g = 1; }
             else if cx + cy > 3 && r.rand_int(10) < density {
                 let k = r.rand_int(100);
-                g = if k < 8 { 6 } else if k < 15 { 7 } else { 2 };
+                g = if k < 7 { 6 }
+                    else if k < 14 { 7 }
+                    else if k < 22 { TILE_GRATE }
+                    else if k < (if s.map == Map.Forest { 38 } else { 28 }) { TILE_BRUSH }
+                    else { 2 };
             }
             s.grid[ty * W + tx] = g;
         }
     }
+    // Symmetric permanent boundary fences along a few central corridor edges (never trapping spawns).
+    fence_set(s, 5, 3, 0);
+    fence_set(s, W - 7, 3, 0);
+    fence_set(s, 5, H - 4, 0);
+    fence_set(s, W - 7, H - 4, 0);
     for i in 4 {
         let p = s.players[i];
         s.missiles[i] = Missile { .. };
@@ -325,6 +381,7 @@ fn reset_round(s: State&, r: rng&) {
         s.players[i].x = (if i % 2 == 0 { 1 } else { W - 2 }) * TILE + TILE / 2;
         s.players[i].y = (if i < 2 { 1 } else { H - 2 }) * TILE + TILE / 2;
         s.players[i].life = Life.Alive;
+        s.players[i].facing = Dir.Down;
         s.players[i].portal_cd = 0;
         s.players[i].bombs = 1;
         s.players[i].range = max(1, s.fire_range as i64) as u8;
@@ -333,6 +390,7 @@ fn reset_round(s: State&, r: rng&) {
         s.players[i].placed = 0;
         s.players[i].held = 0;
         s.players[i].mine_held = 0;
+        s.players[i].build_held = 0;
         s.players[i].ghost = 0;
         s.players[i].napalm = 0;
         s.players[i].drunk = 0;
@@ -340,6 +398,7 @@ fn reset_round(s: State&, r: rng&) {
         s.players[i].unkick = 0;
         s.players[i].mines = 0;
         s.players[i].missiles = 0;
+        s.players[i].builds = 0;
     }
     for k in 2 {
         let tx = if k == 0 { 5 } else { W - 6 };
@@ -382,6 +441,7 @@ fn explode_at(s: State&, bx: i64, by: i64, rng: i64, fire_lvl: i64) {
             if tx < 0 || tx >= W || ty < 0 || ty >= H { break; }
             let g = s.grid[ty * W + tx];
             if g == 1 { break; }
+            if g == TILE_GRATE { continue; } // semi-permeable: flames pass straight through
             flame(s, ty * W + tx, fire_lvl);
             if g == 2 || g == 6 || g == 7 { break; }
             let o = bomb_at(s, tx, ty);
@@ -405,10 +465,12 @@ fn bomb_ahead(s: State&, i: i64, x: i64, y: i64) -> i64 {
     return -1;
 }
 
-// Can a sliding bomb not enter tile nx ny? Walls, crates, flames, bombs, sheep and holding players stop it.
-fn bomb_stopped(s: State&, nx: i64, ny: i64) -> bool {
+// Can a sliding bomb not enter tile nx ny from bx by? Semi-permeable grates let bombs pass; boundary fences stop them.
+fn bomb_stopped(s: State&, bx: i64, by: i64, nx: i64, ny: i64) -> bool {
+    if nx < 0 || nx >= W || ny < 0 || ny >= H { return true; }
+    if fence_between(s, bx, by, nx, ny) { return true; }
     let g = s.grid[ny * W + nx];
-    if is_solid(g) || is_flame(g) || bomb_at(s, nx, ny) >= 0 { return true; }
+    if is_solid_bomb(g) || is_flame(g) || bomb_at(s, nx, ny) >= 0 { return true; }
     let cx = nx * TILE + TILE / 2;
     let cy = ny * TILE + TILE / 2;
     for k in 2 {
@@ -443,10 +505,10 @@ fn step_player(s: State&, i: i64) {
     let sp = max(2, 5 + (s.players[i].speed as i64) - (s.players[i].slow as i64) * 2);
     var dx = 0;
     var dy = 0;
-    if (bits & UP) != 0 { dy = -sp; }
-    else if (bits & DOWN) != 0 { dy = sp; }
-    else if (bits & LEFT) != 0 { dx = -sp; }
-    else if (bits & RIGHT) != 0 { dx = sp; }
+    if (bits & UP) != 0 { dy = -sp; s.players[i].facing = Dir.Up; }
+    else if (bits & DOWN) != 0 { dy = sp; s.players[i].facing = Dir.Down; }
+    else if (bits & LEFT) != 0 { dx = -sp; s.players[i].facing = Dir.Left; }
+    else if (bits & RIGHT) != 0 { dx = sp; s.players[i].facing = Dir.Right; }
     // Drunk power-up: deterministic random jitter you have to fight against!
     if s.players[i].drunk > 0 && (bits & HOLD) == 0 {
         let h = (((s.tick / 10) * 1103515245 + i * 2654435761) >> 4) & 7;
@@ -526,15 +588,47 @@ fn step_player(s: State&, i: i64) {
             s.players[i].napalm = NAPALM;
             s.players[i].mines += 2;
             s.players[i].missiles += 1;
+            s.players[i].builds += 2;
         }
         else if g == 14 {          // Bad/Curse: longer fire, but slows you down!
             s.players[i].range += 2;
             if s.players[i].slow < 3 { s.players[i].slow += 1; }
         }
         else if g == 15 { s.players[i].unkick = 1; }
+        else if g == TILE_PWR_BUILD { s.players[i].builds += 3; }
         s.grid[ty * W + tx] = 0;
     }
     let p = s.players[i];
+    // Q places a destructible brick ahead; Shift+Q places a permanent chain-link boundary fence ahead.
+    let want_build = (bits & BUILD_KEY) != 0;
+    if want_build && p.build_held == 0 && p.builds > 0 {
+        let fdir = if p.facing == Dir.None { Dir.Down } else { p.facing };
+        let btx = tx + dir_dx(fdir);
+        let bty = ty + dir_dy(fdir);
+        if (bits & HOLD) != 0 {
+            if btx > 0 && btx < W - 1 && bty > 0 && bty < H - 1 && !fence_between(s, tx, ty, btx, bty) {
+                if btx == tx + 1 { fence_set(s, tx, ty, 0); }
+                else if btx == tx - 1 { fence_set(s, btx, ty, 0); }
+                else if bty == ty + 1 { fence_set(s, tx, ty, 1); }
+                else if bty == ty - 1 { fence_set(s, tx, bty, 1); }
+                s.players[i].builds -= 1;
+            }
+        } else if btx > 0 && btx < W - 1 && bty > 0 && bty < H - 1 {
+            let tg = s.grid[bty * W + btx];
+            var occ = (tg != 0 && !is_fog(tg)) || is_portal(s, btx, bty) || bomb_at(s, btx, bty) >= 0 || mine_at(s, btx, bty) >= 0;
+            for j in 4 {
+                if (s.players[j].life == Life.Alive || s.players[j].life == Life.BlackSheep) && s.players[j].x / TILE == btx && s.players[j].y / TILE == bty { occ = true; }
+            }
+            for k in 2 {
+                if s.sheep[k].alive != 0 && s.sheep[k].x / TILE == btx && s.sheep[k].y / TILE == bty { occ = true; }
+            }
+            if !occ {
+                s.grid[bty * W + btx] = 2;
+                s.players[i].builds -= 1;
+            }
+        }
+    }
+    s.players[i].build_held = if want_build { 1 } else { 0 };
     let want_mine = ((bits & MINE_KEY) != 0) || ((bits & HOLD) != 0 && (bits & BOMB) != 0);
     if want_mine && p.mine_held == 0 && p.mines > 0 && mine_at(s, tx, ty) < 0 && s.mines.len < 8 {
         s.mines.push(Mine { tx as u8, ty as u8, i as u8, 60 });
@@ -602,10 +696,10 @@ fn step_dead(s: State&, i: i64) {
     let sp = if is_gh { 7 } else { 4 };
     var dx = 0;
     var dy = 0;
-    if (bits & UP) != 0 { dy = -sp; }
-    else if (bits & DOWN) != 0 { dy = sp; }
-    else if (bits & LEFT) != 0 { dx = -sp; }
-    else if (bits & RIGHT) != 0 { dx = sp; }
+    if (bits & UP) != 0 { dy = -sp; s.players[i].facing = Dir.Up; }
+    else if (bits & DOWN) != 0 { dy = sp; s.players[i].facing = Dir.Down; }
+    else if (bits & LEFT) != 0 { dx = -sp; s.players[i].facing = Dir.Left; }
+    else if (bits & RIGHT) != 0 { dx = sp; s.players[i].facing = Dir.Right; }
     let x = s.players[i].x;
     let y = s.players[i].y;
     if is_gh {
@@ -693,7 +787,7 @@ fn tick(s: State&, r: rng&, n: i64) {
         let b = s.bombs[i];
         let nx = b.x as i64 + dir_dx(b.dir);
         let ny = b.y as i64 + dir_dy(b.dir);
-        if bomb_stopped(s, nx, ny) { s.bombs[i].dir = Dir.None; }
+        if bomb_stopped(s, b.x as i64, b.y as i64, nx, ny) { s.bombs[i].dir = Dir.None; }
         else {
             var fx = nx;
             var fy = ny;
@@ -823,7 +917,7 @@ fn tick(s: State&, r: rng&, n: i64) {
     if n % 10 == 0 {
         for i in W * H {
             let g = s.grid[i];
-            if g >= 96 {
+            if is_fog(g) {
                 s.grid[i] = if g > 96 { g - 1 } else { 0 };
             }
         }
@@ -918,8 +1012,11 @@ fn serve_event(ev: http::Event, st: Conn&, out: http::Reply) {
                 let ln = min(data[2] as i64, min(12, data.len - 3));
                 for k in ln { nm.push(data[3 + k]); }
                 post_msg(Msg.Profile { reply: st.reply, kind: kd, name: nm });
+            } else if data.len >= 5 && data[0] == 254 {
+                let b16 = ((data[1] as u16) | ((data[2] as u16) << 8));
+                post_msg(Msg.Input { reply: st.reply, bits: b16, seq: (data[3] as i64) | ((data[4] as i64) << 8) });
             } else if data.len >= 3 {
-                post_msg(Msg.Input { reply: st.reply, bits: data[0], seq: (data[1] as i64) | ((data[2] as i64) << 8) });
+                post_msg(Msg.Input { reply: st.reply, bits: data[0] as u16, seq: (data[1] as i64) | ((data[2] as i64) << 8) });
             }
         };
     }
@@ -956,7 +1053,7 @@ thread_fn client(url: u8[..128]) {
     var session = http::session();
     var conn, err = http::ws_client_connect(session, url[..]);
     guard err.code == 0 else { write_stderr(str("connect: ", err.call, " ", err.code, "\n")); qput(Lost { 1 }); return; }
-    var bits: u8 = 0;
+    var bits: u16 = 0;
     var seq = 0;
     loop {
         var prof_ok = false;
@@ -976,7 +1073,9 @@ thread_fn client(url: u8[..128]) {
             guard http::ws_client_binary(conn, pkt).code == 0 else { break; }
         }
         var one: u8[>..] = [];
-        one.push(bits);
+        one.push(254);
+        one.push((bits & 255) as u8);
+        one.push((bits >> 8) as u8);
         one.push((seq & 255) as u8);
         one.push((seq >> 8) as u8);
         guard http::ws_client_binary(conn, one).code == 0 else { break; }
@@ -1509,6 +1608,93 @@ fn draw_steel(c: ui::Context, x: f32, y: f32, t: f32) {
     ui::fill_circle(c, ui::rect(x + t * 0.4, y + t * 0.4, t * 0.2, t * 0.2), ui::rgb(255, 120, 80));
 }
 
+// Semi-permeable grate: blocks players & sheep, lets kicked bombs and flames pass straight through.
+fn draw_grate(c: ui::Context, x: f32, y: f32, t: f32) {
+    ui::fill_rect(c, ui::rect(x + 2.0, y + 2.0, t - 4.0, t - 4.0), 5.0, ui::rgba(50, 70, 92, 110));
+    let bar = ui::rgb(168, 198, 224);
+    ui::stroke_rect(c, ui::rect(x + 2.5, y + 2.5, t - 5.0, t - 5.0), 4.0, 3.0, bar);
+    for k in 1..4 {
+        let f = (k as f32) * 0.25;
+        ui::stroke_line(c, x + t * f, y + 3.0, x + t * f, y + t - 3.0, 2.0, ui::rgba(195, 220, 240, 210));
+        ui::stroke_line(c, x + 3.0, y + t * f, x + t - 3.0, y + t * f, 2.0, ui::rgba(195, 220, 240, 210));
+    }
+    // Corner bolts
+    let bolt = ui::rgb(220, 235, 248);
+    ui::fill_circle(c, ui::rect(x + 4.0, y + 4.0, 5.0, 5.0), bolt);
+    ui::fill_circle(c, ui::rect(x + t - 9.0, y + 4.0, 5.0, 5.0), bolt);
+    ui::fill_circle(c, ui::rect(x + 4.0, y + t - 9.0, 5.0, 5.0), bolt);
+    ui::fill_circle(c, ui::rect(x + t - 9.0, y + t - 9.0, 5.0, 5.0), bolt);
+}
+
+// Walkable Forest/Brush canopy drawn OVER players so anyone inside is hidden from opponents (burns away).
+fn draw_brush(c: ui::Context, map: Map, x: f32, y: f32, t: f32, tm: f32, viewer_inside: bool) {
+    let a = if viewer_inside { 135 } else { 235 };
+    let sway = sin(tm * 2.4 + x * 0.04 + y * 0.03) * t * 0.03;
+    let dark = match map {
+        Desert => ui::rgba(92, 118, 46, a),
+        Mountains => ui::rgba(36, 92, 64, a),
+        Island => ui::rgba(28, 128, 56, a),
+        Forest => ui::rgba(26, 98, 42, a),
+    };
+    let mid = match map {
+        Desert => ui::rgba(128, 152, 62, a),
+        Mountains => ui::rgba(52, 126, 86, a),
+        Island => ui::rgba(48, 168, 72, a),
+        Forest => ui::rgba(46, 138, 58, a),
+    };
+    let hi = match map {
+        Desert => ui::rgba(164, 186, 82, a),
+        Mountains => ui::rgba(82, 164, 114, a),
+        Island => ui::rgba(88, 206, 104, a),
+        Forest => ui::rgba(82, 178, 86, a),
+    };
+    ui::fill_circle(c, ui::rect(x - t * 0.06 + sway, y + t * 0.06, t * 0.62, t * 0.62), dark);
+    ui::fill_circle(c, ui::rect(x + t * 0.42 + sway, y + t * 0.08, t * 0.62, t * 0.62), dark);
+    ui::fill_circle(c, ui::rect(x + t * 0.14 + sway, y + t * 0.36, t * 0.72, t * 0.64), dark);
+    ui::fill_circle(c, ui::rect(x + t * 0.04 + sway, y - t * 0.04, t * 0.56, t * 0.56), mid);
+    ui::fill_circle(c, ui::rect(x + t * 0.38 + sway, y + t * 0.02, t * 0.56, t * 0.56), mid);
+    ui::fill_circle(c, ui::rect(x + t * 0.18 + sway, y + t * 0.24, t * 0.62, t * 0.56), mid);
+    ui::fill_circle(c, ui::rect(x + t * 0.22 + sway, y + t * 0.06, t * 0.34, t * 0.3), hi);
+    ui::fill_circle(c, ui::rect(x + t * 0.5 + sway, y + t * 0.26, t * 0.26, t * 0.24), hi);
+}
+
+// Permanent chain-link boundary fences drawn on the edges between tiles (take up zero square space).
+fn draw_fences(c: ui::Context, s: State&, ox: f32, oy: f32, t: f32) {
+    let wire = ui::rgb(212, 224, 238);
+    let dark = ui::rgb(52, 62, 76);
+    let post = ui::rgb(245, 210, 95);
+    for ty in H {
+        for tx in W {
+            if fence_get(s, tx, ty, 0) {
+                let x = ox + (tx + 1) * t;
+                let y = oy + ty * t;
+                ui::stroke_line(c, x, y, x, y + t, 6.0, dark);
+                ui::stroke_line(c, x, y, x, y + t, 3.0, wire);
+                for k in 4 {
+                    let yy = y + t * (0.12 + 0.25 * (k as f32));
+                    ui::stroke_line(c, x - 3.5, yy - 3.5, x + 3.5, yy + 3.5, 1.5, wire);
+                    ui::stroke_line(c, x + 3.5, yy - 3.5, x - 3.5, yy + 3.5, 1.5, wire);
+                }
+                ui::fill_circle(c, ui::rect(x - 4.0, y - 4.0, 8.0, 8.0), post);
+                ui::fill_circle(c, ui::rect(x - 4.0, y + t - 4.0, 8.0, 8.0), post);
+            }
+            if fence_get(s, tx, ty, 1) {
+                let x = ox + tx * t;
+                let y = oy + (ty + 1) * t;
+                ui::stroke_line(c, x, y, x + t, y, 6.0, dark);
+                ui::stroke_line(c, x, y, x + t, y, 3.0, wire);
+                for k in 4 {
+                    let xx = x + t * (0.12 + 0.25 * (k as f32));
+                    ui::stroke_line(c, xx - 3.5, y - 3.5, xx + 3.5, y + 3.5, 1.5, wire);
+                    ui::stroke_line(c, xx + 3.5, y - 3.5, xx - 3.5, y + 3.5, 1.5, wire);
+                }
+                ui::fill_circle(c, ui::rect(x - 4.0, y - 4.0, 8.0, 8.0), post);
+                ui::fill_circle(c, ui::rect(x + t - 4.0, y - 4.0, 8.0, 8.0), post);
+            }
+        }
+    }
+}
+
 fn draw_gift(c: ui::Context, x: f32, y: f32, t: f32, tm: f32) {
     let gold = ui::rgb(255, 205, 70);
     ui::fill_rect(c, ui::rect(x, y, t, t), 6.0, ui::rgb(128, 72, 178));
@@ -1532,6 +1718,7 @@ fn draw_power(c: ui::Context, g: u8, x: f32, y0: f32, t: f32, tm: f32) {
                 else if g == 13 { ui::rgb(185, 55, 165) }
                 else if g == 14 { ui::rgb(96, 42, 112) }
                 else if g == 15 { ui::rgb(52, 74, 98) }
+                else if g == TILE_PWR_BUILD { ui::rgb(156, 94, 48) }
                 else { ui::rgb(30, 150, 205) };
     ui::fill_circle(c, ui::rect(x + t * 0.04, y + t * 0.04, t * 0.92, t * 0.92), ui::rgba(255, 255, 255, 40));
     ui::fill_rect(c, ui::rect(x + t * 0.14, y + t * 0.14, t * 0.72, t * 0.72), t * 0.18, plate);
@@ -1589,6 +1776,13 @@ fn draw_power(c: ui::Context, g: u8, x: f32, y0: f32, t: f32, tm: f32) {
         ui::stroke_line(c, x + t * 0.32, y + t * 0.46, x + t * 0.68, y + t * 0.46, 3.0, ui::rgb(225, 235, 245));
         ui::stroke_line(c, x + t * 0.28, y + t * 0.64, x + t * 0.5, y + t * 0.76, 3.0, ui::rgb(225, 235, 245));
         ui::stroke_line(c, x + t * 0.72, y + t * 0.64, x + t * 0.5, y + t * 0.76, 3.0, ui::rgb(225, 235, 245));
+    } else if g == TILE_PWR_BUILD { // builder kit (brick + fence posts)
+        ui::fill_rect(c, ui::rect(x + t * 0.24, y + t * 0.48, t * 0.52, t * 0.24), 2.0, ui::rgb(225, 122, 68));
+        ui::stroke_rect(c, ui::rect(x + t * 0.24, y + t * 0.48, t * 0.52, t * 0.24), 2.0, 1.5, ui::rgb(255, 235, 200));
+        ui::stroke_line(c, x + t * 0.34, y + t * 0.24, x + t * 0.34, y + t * 0.48, 3.0, ui::rgb(225, 235, 245));
+        ui::stroke_line(c, x + t * 0.66, y + t * 0.24, x + t * 0.66, y + t * 0.48, 3.0, ui::rgb(225, 235, 245));
+        ui::stroke_line(c, x + t * 0.34, y + t * 0.32, x + t * 0.66, y + t * 0.32, 2.0, ui::rgb(225, 235, 245));
+        ui::stroke_line(c, x + t * 0.34, y + t * 0.41, x + t * 0.66, y + t * 0.41, 2.0, ui::rgb(225, 235, 245));
     } else {             // bolt
         ui::fill_triangle(c, x + t * 0.56, y + t * 0.2, x + t * 0.34, y + t * 0.52, x + t * 0.52, y + t * 0.52, ui::rgb(255, 235, 90));
         ui::fill_triangle(c, x + t * 0.48, y + t * 0.46, x + t * 0.68, y + t * 0.46, x + t * 0.44, y + t * 0.8, ui::rgb(255, 235, 90));
@@ -2247,10 +2441,12 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
                 else if g == 2 { draw_brick(hud, s.map, x, y, t); }
                 else if g == 6 { draw_steel(hud, x, y, t); }
                 else if g == 7 { draw_gift(hud, x, y, t, tm); }
+                else if g == TILE_GRATE { draw_grate(hud, x, y, t); }
                 else if is_power(g) { draw_power(hud, g, x, y, t, tm); }
                 else if is_flame(g) { draw_flame(hud, g, x, y, t, tm); }
             }
         }
+        draw_fences(hud, s, ox, oy, t);
         if s.portals_on != 0 {
             draw_portal(hud, 0, ox + s.portals[0] * t, oy + s.portals[1] * t, t, tm);
             draw_portal(hud, 1, ox + s.portals[2] * t, oy + s.portals[3] * t, t, tm);
@@ -2270,8 +2466,23 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
             if life != Life.Off {
                 let px = ox + shown[i].x / TILE * t;
                 let py = oy + shown[i].y / TILE * t;
-                if life == Life.Alive { draw_player(hud, s, i, px, py, t, tm); }
-                else if life == Life.BlackSheep { draw_black_sheep(hud, s, i, px, py, t, tm); }
+                let ptx = (s.players[i].x / TILE);
+                let pty = (s.players[i].y / TILE);
+                let in_brush = ptx >= 0 && ptx < W && pty >= 0 && pty < H && s.grid[pty * W + ptx] == TILE_BRUSH;
+                if life == Life.Alive {
+                    if !in_brush || i == s.you { draw_player(hud, s, i, px, py, t, tm); }
+                } else if life == Life.BlackSheep { draw_black_sheep(hud, s, i, px, py, t, tm); }
+            }
+        }
+        // Forests/Brush canopy drawn OVER players so anyone inside is hidden from opponents!
+        let my_tx = s.players[s.you].x / TILE;
+        let my_ty = s.players[s.you].y / TILE;
+        for ty in H {
+            for tx in W {
+                if s.grid[ty * W + tx] == TILE_BRUSH {
+                    let inside = s.players[s.you].life == Life.Alive && tx == my_tx && ty == my_ty;
+                    draw_brush(hud, s.map, ox + tx * t, oy + ty * t, t, tm, inside);
+                }
             }
         }
         for i in 4 {
@@ -2305,6 +2516,7 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
                 if s.missiles[s.you].active != 0 { st.append("GUIDING MISSILE (Arrows/WASD steer, Space detonate)  "); }
                 else if me.missiles > 0 { format(st, "Missile x", me.missiles, " [Space]  "); }
                 if me.mines > 0 { format(st, "Mines x", me.mines, " [E/X]  "); }
+                if me.builds > 0 { format(st, "Build x", me.builds, " [Q=Brick, Shift+Q=Fence]  "); }
                 if me.napalm > 0 { st.append("NAPALM  "); }
                 if me.drunk > 0 { st.append("DRUNK!  "); }
                 if me.unkick != 0 { st.append("AnchorBombs  "); }
@@ -2375,23 +2587,25 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
 
 // ---- main -------------------------------------------------------------------------------------
 
-fn keys() -> u8 {
-    var b: u8 = 0;
-    if gfx::key_down("Up") || gfx::key_down("W") { b |= UP; }
-    if gfx::key_down("Down") || gfx::key_down("S") { b |= DOWN; }
-    if gfx::key_down("Left") || gfx::key_down("A") { b |= LEFT; }
-    if gfx::key_down("Right") || gfx::key_down("D") { b |= RIGHT; }
-    if gfx::key_down("Space") { b |= BOMB; }
-    if gfx::key_down("Left Shift") || gfx::key_down("Right Shift") { b |= HOLD; }
-    if gfx::key_down("E") || gfx::key_down("X") { b |= MINE_KEY; }
+fn keys() -> u16 {
+    var b: u16 = 0;
+    if gfx::key_down("Up") || gfx::key_down("W") { b |= UP as u16; }
+    if gfx::key_down("Down") || gfx::key_down("S") { b |= DOWN as u16; }
+    if gfx::key_down("Left") || gfx::key_down("A") { b |= LEFT as u16; }
+    if gfx::key_down("Right") || gfx::key_down("D") { b |= RIGHT as u16; }
+    if gfx::key_down("Space") { b |= BOMB as u16; }
+    if gfx::key_down("Left Shift") || gfx::key_down("Right Shift") { b |= HOLD as u16; }
+    if gfx::key_down("E") || gfx::key_down("X") { b |= MINE_KEY as u16; }
+    if gfx::key_down("Q") { b |= BUILD_KEY as u16; }
+    if gfx::key_down("F") { b |= FIRE_KEY as u16; }
     return b;
 }
 
 // A bot's keys: wander in changing directions and drop bombs now and then.
-fn bot(frame: i64, seed: i64) -> u8 {
+fn bot(frame: i64, seed: i64) -> u16 {
     let d = ((frame / 20 + seed) * 7) % 4;
-    var b: u8 = (1 << d) as u8;
-    if frame % 45 == 0 { b |= BOMB; }
+    var b: u16 = (1 << d) as u16;
+    if frame % 45 == 0 { b |= BOMB as u16; }
     return b;
 }
 
@@ -2619,7 +2833,7 @@ fn main() {
     var r = rng { random_seed() };
     var ack: i64[4] = [0, 0, 0, 0];
     var inp_max: i64[4] = [-1, -1, -1, -1];    // host: highest input seq received from each client
-    var inp_bits: u8[>..] = [];
+    var inp_bits: u16[>..] = [];
     inp_bits.resize(128, 0);                   // host: 32-slot seq input ring per player
     var inp_seq: i64[>..] = [];
     inp_seq.resize(128, -1);
@@ -2732,7 +2946,7 @@ fn main() {
     var shown: float2[4] = [z, z, z, z];
     var fx = Fx { .. };
     var seq = 0;         // client: number of the latest input step
-    var hist: u8[..240] = [];       // the key bits of the last steps, to replay on top of a snapshot
+    var hist: u16[..240] = [];       // the key bits of the last steps, to replay on top of a snapshot
     var px = 0;          // client: where this player is predicted to be
     var py = 0;
     var acc = 0.0;
@@ -2820,7 +3034,7 @@ fn main() {
         ui::input_from_gfx(panel);
         ui::input_from_gfx(menu);
         if frames >= 0 { sleep(0.016); }
-        let bits = if frames >= 0 { bot(frame, if mode == GameMode.Join { 3 } else { 0 }) } else if typing { 0 as u8 } else { keys() };
+        let bits: u16 = if frames >= 0 { bot(frame, if mode == GameMode.Join { 3 } else { 0 }) } else if typing { 0 as u16 } else { keys() };
         acc += if frames >= 0 { 1.0 / 60.0 } else { min(gfx::delta_time(), 0.1) };
         if mode == GameMode.Lobby {
             acc = 0.0;
@@ -2896,13 +3110,17 @@ fn main() {
                 if use_udp && joined {
                     let cnt = min(8, hist.len);
                     var d: u8[>..] = [];
-                    d.push(67);                                  // 'C': redundant input ring packet
+                    d.push(68);                                  // 'D': redundant 16-bit input ring packet
                     d.push(s.you);
                     d.push(if udp_rx_age < 45 { 1 } else { 0 }); // bidirectional UDP health bit
                     d.push((seq & 255) as u8);
                     d.push((seq >> 8) as u8);
                     d.push(cnt as u8);
-                    for k in cnt { d.push(hist[hist.len - 1 - k]); }
+                    for k in cnt {
+                        let bk = hist[hist.len - 1 - k];
+                        d.push((bk & 255) as u8);
+                        d.push((bk >> 8) as u8);
+                    }
                     udp_send(csock, d[..], hostpeer);
                 }
             }
@@ -2965,11 +3183,31 @@ fn main() {
                     },
                 }
             }
-            loop {          // datagrams: 'C', slot, rx_ok, seq lo, seq hi, count, bits[0..count-1]
+            loop {          // datagrams: 'D' (16-bit bits), 'C' (8-bit bits), 'B' (legacy)
                 var from = 0;
                 let got = udp_recv(usock, rbuf[..], from);
                 if got < 0 { break; }
-                if got >= 7 && rbuf[0] == 67 {
+                if got >= 8 && rbuf[0] == 68 {
+                    let who = rbuf[1] as i64;
+                    guard who >= 1 && who < 4 && s.players[who].life != Life.Off else { continue; }
+                    let sq = (rbuf[3] as i64) | ((rbuf[4] as i64) << 8);
+                    let cnt = min(8, min(rbuf[5] as i64, (got - 6) / 2));
+                    n_udp += 1;
+                    upeer[who] = from;
+                    uage[who] = 0;
+                    uok[who] = rbuf[2] != 0;
+                    if inp_max[who] < 0 { ack[who] = (sq - 1) & 65535; inp_max[who] = sq; }
+                    for k in cnt {
+                        let sk = (sq - k) & 65535;
+                        let df = (sk - ack[who]) & 65535;
+                        if df > 0 && df < 32 {
+                            let sl = who * 32 + (sk & 31);
+                            inp_bits[sl] = (rbuf[6 + k * 2] as u16) | ((rbuf[7 + k * 2] as u16) << 8);
+                            inp_seq[sl] = sk;
+                        }
+                    }
+                    if ((sq - inp_max[who]) & 65535) < 32768 { inp_max[who] = sq; }
+                } else if got >= 7 && rbuf[0] == 67 {
                     let who = rbuf[1] as i64;
                     guard who >= 1 && who < 4 && s.players[who].life != Life.Off else { continue; }
                     let sq = (rbuf[3] as i64) | ((rbuf[4] as i64) << 8);
@@ -2984,7 +3222,7 @@ fn main() {
                         let df = (sk - ack[who]) & 65535;
                         if df > 0 && df < 32 {
                             let sl = who * 32 + (sk & 31);
-                            inp_bits[sl] = rbuf[6 + k];
+                            inp_bits[sl] = rbuf[6 + k] as u16;
                             inp_seq[sl] = sk;
                         }
                     }
@@ -3000,7 +3238,7 @@ fn main() {
                     let df = (sq - ack[who]) & 65535;
                     if df > 0 && df < 32 {
                         let sl = who * 32 + (sq & 31);
-                        inp_bits[sl] = rbuf[2];
+                        inp_bits[sl] = rbuf[2] as u16;
                         inp_seq[sl] = sq;
                     }
                     if ((sq - inp_max[who]) & 65535) < 32768 { inp_max[who] = sq; }
@@ -3352,6 +3590,7 @@ fn main() {
                 var p8 = (s.power_mask & PWR_DRUNK) != 0;
                 var p9 = (s.power_mask & PWR_BAD) != 0;
                 var p10 = (s.power_mask & PWR_UNKICK) != 0;
+                var p11 = (s.power_mask & PWR_BUILD) != 0;
                 ui::layout_row_dynamic(menu, 30.0, 2);
                 ui::checkbox_label(menu, "Flame (Range+)", p0);
                 ui::checkbox_label(menu, "Extra Bomb", p1);
@@ -3369,6 +3608,8 @@ fn main() {
                 ui::checkbox_label(menu, "Curse (Slow + Range)", p9);
                 ui::layout_row_dynamic(menu, 30.0, 2);
                 ui::checkbox_label(menu, "Unkickable Bombs", p10);
+                ui::checkbox_label(menu, "Builder Kit (Q/Shift+Q)", p11);
+                ui::layout_row_dynamic(menu, 30.0, 2);
                 var p_on = s.portals_on != 0;
                 if ui::checkbox_label(menu, "Portals Enabled", p_on) {
                     s.portals_on = if p_on { 1 } else { 0 };
@@ -3377,7 +3618,7 @@ fn main() {
                         s.grid[(s.portals[3] as i64) * W + (s.portals[2] as i64)] = 0;
                     }
                 }
-                var nm: u16 = 0;
+                var nm: u32 = 0;
                 if p0 { nm |= PWR_FLAME; }
                 if p1 { nm |= PWR_BOMB; }
                 if p2 { nm |= PWR_SPEED; }
@@ -3389,6 +3630,7 @@ fn main() {
                 if p8 { nm |= PWR_DRUNK; }
                 if p9 { nm |= PWR_BAD; }
                 if p10 { nm |= PWR_UNKICK; }
+                if p11 { nm |= PWR_BUILD; }
                 s.power_mask = nm;
                 ui::layout_row_dynamic(menu, 38.0, 2);
                 if ui::button_label(menu, "New Round") { reset_round(s, r); host_open = false; }
