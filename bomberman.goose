@@ -38,6 +38,8 @@ enum Character { Goose, Squirrel, Baby, Cow, Pig, Farmer }
 enum Map { Island, Forest, Mountains, Desert }
 enum Dir { None, Up, Down, Left, Right }
 enum Life { Off, Alive, BlackSheep, FogGhost }
+enum GameMode { Lobby, Solo, Host, Join }
+enum HostNet { Lan, Upnp, Playit }
 
 fn is_dead(l: Life) -> bool { l == Life.BlackSheep || l == Life.FogGhost }
 
@@ -178,6 +180,11 @@ extern fn udp_send(fd: i64, b: const u8[:], peer: i64) -> i64;
 extern fn udp_recv(fd: i64, b: u8[:], from: i64&) -> i64;
 extern fn udp_local_ip(b: u8[:]) -> i64;
 
+// Automatic router port forwarding (UPnP IGD + NAT-PMP) in upnp.c.
+// Returns 0 = mapped with public IP, 1 = mapped but CGNAT/double-NAT detected, -1 = failed/unavailable.
+extern fn upnp_map(port: i64, pub_ip: u8[:], pub_len: i64&, msg: u8[:], msg_len: i64&) -> i64;
+extern fn upnp_unmap(port: i64) -> i64;
+
 // Host: input, profile update, or disconnect from a connection (reply names it). Client: key bits or profile to send.
 // seq numbers a client's input steps; the host echoes the latest one it has seen in State.ack.
 enum Msg {
@@ -188,6 +195,8 @@ enum Msg {
 struct Pad { bits: u8, seq: i64 }
 struct Profile { kind: Character, name: u8[..12] }
 struct Lost { code: i64 }
+struct UpnpReq { port: i64, enable: bool }
+struct UpnpRes { code: i64, pub_ip: u8[..64], msg: u8[..128] }
 
 fn player_name(s: State&, i: i64, out: u8[>..]&) {
     out.resize(0);
@@ -902,8 +911,30 @@ thread_fn server(cfg: http::Config) {
     http::report(http::serve(cfg, Conn { .. }) { ev, st, out => serve_event(ev, st, out); });
 }
 
+thread_fn upnp_worker(req: UpnpReq) {
+    var res = UpnpRes { code: -1, .. };
+    if !req.enable {
+        upnp_unmap(req.port);
+        res.code = 2;
+        let m = "Port mapping removed (LAN only)";
+        for k in m.len { res.msg.push(m[k]); }
+        qput(res);
+        return;
+    }
+    var ipbuf: u8[>..] = [];
+    ipbuf.resize(64, 0);
+    var msgbuf: u8[>..] = [];
+    msgbuf.resize(128, 0);
+    var iplen = 0;
+    var msglen = 0;
+    res.code = upnp_map(req.port, ipbuf[..], iplen, msgbuf[..], msglen);
+    for k in min(64, iplen) { res.pub_ip.push(ipbuf[k]); }
+    for k in min(128, msglen) { res.msg.push(msgbuf[k]); }
+    qput(res);
+}
+
 // Joins ws://url: sends the key bits and profile updates main queues, and queues each snapshot back to main.
-thread_fn client(url: u8[..64]) {
+thread_fn client(url: u8[..128]) {
     var session = http::session();
     var conn, err = http::ws_client_connect(session, url[..]);
     guard err.code == 0 else { write_stderr(str("connect: ", err.call, " ", err.code, "\n")); qput(Lost { 1 }); return; }
@@ -2268,26 +2299,30 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
             ui::fill_rect(hud, ui::rect((vw - sw0) * 0.5 - 14.0, vh - 40.0, sw0 + 28.0, 34.0), 7.0, ui::rgba(10, 12, 20, 200));
             text(hud, (vw - sw0) * 0.5, vh - 37.0, st, ui::rgb(255, 225, 110));
         }
-        ui::fill_rect(hud, ui::rect(0, 0, vw, top - 8.0), 0.0, ui::rgba(10, 12, 20, 205));
-        var x: f32 = 14.0;
-        for i in 4 {
-            guard s.players[i].life != Life.Off else { continue; }
-            var nm: u8[>..] = [];
-            player_name(s, i, nm);
-            var line: u8[>..] = [];
-            if s.players[i].streak >= 2 { format(line, nm[..], " ", s.players[i].wins, " [", s.players[i].streak, "x]"); }
-            else { format(line, nm[..], " ", s.players[i].wins); }
-            let lw = ui::text_width(ui::font(hud), line);
-            let boxw = max(108.0, lw + 38.0);
-            marker(hud, i, x + 12.0, 24.0, 10.0);
-            text(hud, x + 28.0, 10.0, line, if s.players[i].life == Life.Alive { ui::rgb(240, 240, 245) } else { ui::rgb(120, 124, 140) });
-            if i == s.you && mode != "solo" { ui::stroke_rect(hud, ui::rect(x - 6.0, 4.0, boxw, 40.0), 7.0, 2.5, ui::rgb(255, 255, 255)); }
-            x += boxw + 12.0;
+        if mode != "lobby" {
+            ui::fill_rect(hud, ui::rect(0, 0, vw, top - 8.0), 0.0, ui::rgba(10, 12, 20, 205));
+            var x: f32 = 14.0;
+            for i in 4 {
+                guard s.players[i].life != Life.Off else { continue; }
+                var nm: u8[>..] = [];
+                player_name(s, i, nm);
+                var line: u8[>..] = [];
+                if s.players[i].streak >= 2 { format(line, nm[..], " ", s.players[i].wins, " [", s.players[i].streak, "x]"); }
+                else { format(line, nm[..], " ", s.players[i].wins); }
+                let lw = ui::text_width(ui::font(hud), line);
+                let boxw = max(108.0, lw + 38.0);
+                marker(hud, i, x + 12.0, 24.0, 10.0);
+                text(hud, x + 28.0, 10.0, line, if s.players[i].life == Life.Alive { ui::rgb(240, 240, 245) } else { ui::rgb(120, 124, 140) });
+                if i == s.you && mode != "solo" { ui::stroke_rect(hud, ui::rect(x - 6.0, 4.0, boxw, 40.0), 7.0, 2.5, ui::rgb(255, 255, 255)); }
+                x += boxw + 12.0;
+            }
+            var tag: u8[>..] = [];
+            if mode == "solo" { tag.append("SOLO"); } else if mode == "host" { tag.append("HOST"); } else { format(tag, "CLIENT P", s.you + 1); if mode == "udp" { tag.append(" UDP"); } }
+            if fx.lost { tag.append("  DISCONNECTED"); }
+            text(hud, vw - 14.0 - ui::text_width(ui::font(hud), tag), 10.0, tag, ui::rgb(160, 168, 190));
+        } else {
+            ui::fill_rect(hud, ui::rect(0, 0, vw, vh), 0.0, ui::rgba(8, 10, 18, 165));
         }
-        var tag: u8[>..] = [];
-        if mode == "solo" { tag.append("SOLO"); } else if mode == "host" { tag.append("HOST"); } else { format(tag, "CLIENT P", s.you + 1); if mode == "udp" { tag.append(" UDP"); } }
-        if fx.lost { tag.append("  DISCONNECTED"); }
-        text(hud, vw - 14.0 - ui::text_width(ui::font(hud), tag), 10.0, tag, ui::rgb(160, 168, 190));
         if s.over > 0 && s.dance_who < 4 {
             draw_dance(hud, s, s.dance_who as i64, vw, vh, tm);
         }
@@ -2393,24 +2428,173 @@ fn wav_pcm(raw: const u8[:], pcm: f32[>..]&, info: i64[>..]&) -> bool {
     return false;
 }
 
+fn parse_port(s: const u8[:], fallback: i64) -> i64 {
+    var v = 0;
+    var any = false;
+    for i in s.len {
+        let c = s[i];
+        if c >= 48 && c <= 57 {
+            v = v * 10 + (c - 48);
+            any = true;
+            if v > 65535 { return fallback; }
+        } else if c != 32 && c != 13 && c != 10 {
+            return fallback;
+        }
+    }
+    if !any || v < 1 || v > 65535 { return fallback; }
+    return v;
+}
+
+// Parses "HOST" or "HOST:PORT" (stripping optional ws:// or http:// and trailing /path).
+fn parse_host_port(raw: const u8[:], host_out: u8[..96]&, default_port: i64) -> i64 {
+    host_out.resize(0);
+    var a = 0;
+    var b = raw.len;
+    while a < b && (raw[a] == 32 || raw[a] == 9 || raw[a] == 13 || raw[a] == 10) { a += 1; }
+    while b > a && (raw[b - 1] == 32 || raw[b - 1] == 9 || raw[b - 1] == 13 || raw[b - 1] == 10) { b -= 1; }
+    // Strip optional scheme like "ws://" or "http://"
+    for i in a..b - 2 {
+        if raw[i] == 58 && raw[i + 1] == 47 && raw[i + 2] == 47 { a = i + 3; break; }
+    }
+    // Strip optional path suffix "/..."
+    for i in a..b {
+        if raw[i] == 47 { b = i; break; }
+    }
+    var colon = -1;
+    for i in a..b {
+        if raw[i] == 58 { colon = i; }
+    }
+    let hend = if colon > a { colon } else { b };
+    let hlen = min(96, max(0, hend - a));
+    for k in hlen { host_out.push(raw[a + k]); }
+    if colon > a && colon + 1 < b {
+        return parse_port(raw[colon + 1..b], default_port);
+    }
+    return default_port;
+}
+
+fn format_host_port(host: const u8[:], port: i64, out: u8[>..]&) {
+    out.resize(0);
+    if port == 8080 { out.append(host); }
+    else { format(out, host, ":", port); }
+}
+
+fn prefs_path(out: u8[>..]&) -> bool {
+    out.resize(0);
+    if !env("HOME", out) {
+        out.resize(0);
+        if !env("USERPROFILE", out) { return false; }
+    }
+    out.append("/.bomberman");
+    make_dir(out[..]);
+    out.append("/prefs.txt");
+    return true;
+}
+
+fn load_prefs(name: u8[..12]&, kind: Character&, has_name_cli: bool, join_addr: u8[..96]&, has_join_cli: bool, playit_addr: u8[..96]&, has_playit_cli: bool) {
+    var path: u8[>..] = [];
+    guard prefs_path(path) && file_exists(path[..]) else { return; }
+    var raw: u8[>..] = [];
+    guard read_file(path[..], raw) else { return; }
+    var line = 0;
+    var start = 0;
+    for i in raw.len + 1 {
+        if i == raw.len || raw[i] == 10 {
+            var end = i;
+            if end > start && raw[end - 1] == 13 { end -= 1; }
+            let seg = raw[start..end];
+            if line == 0 && !has_name_cli && seg.len > 0 {
+                name.resize(0);
+                for k in min(12, seg.len) { name.push(seg[k]); }
+            } else if line == 1 && seg.len > 0 {
+                let kv = parse_port(seg, 0);
+                if seg.len == 1 && seg[0] == 48 { kind = Character.Goose; }
+                else if kv >= 1 && kv <= 5 { kind = char_from_u8(kv as u8); }
+            } else if line == 2 && !has_join_cli && seg.len > 0 {
+                join_addr.resize(0);
+                for k in min(96, seg.len) { join_addr.push(seg[k]); }
+            } else if line == 3 && !has_playit_cli && seg.len > 0 {
+                playit_addr.resize(0);
+                for k in min(96, seg.len) { playit_addr.push(seg[k]); }
+            }
+            line += 1;
+            start = i + 1;
+        }
+    }
+}
+
+fn save_prefs(name: const u8[:], kind: Character, join_addr: const u8[:], playit_addr: const u8[:]) {
+    var path: u8[>..] = [];
+    guard prefs_path(path) else { return; }
+    var data: u8[>..] = [];
+    format(data, name, "\n", char_to_u8(kind), "\n", join_addr, "\n", playit_addr, "\n");
+    write_file_atomic(path[..], data[..]);
+}
+
+fn print_join_hint(label: const u8[:], addr: const u8[:]) {
+    print(label, " - friends can join with: ", addr);
+    print("  Mac:     ./bomberman-portable join ", addr);
+    print("  Windows: bomberman.exe join ", addr);
+}
+
 fn main() {
     let argv = args();
-    let mode = if argv.len > 1 { argv[1] } else { "solo" };
-    guard mode == "solo" || mode == "host" || (mode == "join" && argv.len > 2) else { abort("usage: bomberman [solo | host | join HOST]"); }
+    var mode: GameMode = GameMode.Lobby;
+    var host_net: HostNet = HostNet.Lan;
+    var host_port = 8080;
     var frames = -1;
     var init_map: Map = Map.Island;
     var force_tcp = false;
     var my_name: u8[..12] = [];
-    var my_kind: Character = if mode == "join" { Character.Goose } else { default_kind(0) };
+    var has_name_cli = false;
+    var join_addr: u8[..96] = [];
+    var has_join_cli = false;
+    var playit_addr: u8[..96] = [];
+    var has_playit_cli = false;
+    if argv.len > 1 {
+        if argv[1] == "solo" { mode = GameMode.Solo; }
+        else if argv[1] == "host" { mode = GameMode.Host; }
+        else if argv[1] == "join" && argv.len > 2 {
+            mode = GameMode.Join;
+            has_join_cli = true;
+            for k in min(96, argv[2].len) { join_addr.push(argv[2][k]); }
+        } else {
+            abort("usage: bomberman [solo | host [--port N] [--upnp | --lan | --playit ADDR] | join HOST[:PORT] [tcp]]");
+        }
+    }
+    var my_kind: Character = if mode == GameMode.Join { Character.Goose } else { default_kind(0) };
     for i in argv.len {
         if argv[i] == "tcp" { force_tcp = true; }
+        if argv[i] == "--upnp" { host_net = HostNet.Upnp; }
+        if argv[i] == "--lan" { host_net = HostNet.Lan; }
+        if argv[i] == "--port" && i + 1 < argv.len { host_port = parse_port(argv[i + 1], 8080); }
+        if argv[i] == "--playit" && i + 1 < argv.len {
+            host_net = HostNet.Playit;
+            has_playit_cli = true;
+            playit_addr.resize(0);
+            for k in min(96, argv[i + 1].len) { playit_addr.push(argv[i + 1][k]); }
+        }
         if argv[i] == "--frames" && i + 1 < argv.len { frames = parse_int(argv[i + 1]); }
         if argv[i] == "--map" && i + 1 < argv.len { init_map = map_from_int(parse_int(argv[i + 1])); }
         if argv[i] == "--name" && i + 1 < argv.len {
+            has_name_cli = true;
             my_name.resize(0);
             let ln = min(12, argv[i + 1].len);
             for k in ln { my_name.push(argv[i + 1][k]); }
         }
+    }
+    if frames < 0 {
+        load_prefs(my_name, my_kind, has_name_cli, join_addr, has_join_cli, playit_addr, has_playit_cli);
+    }
+    var port_str: u8[..8] = [];
+    format(port_str, host_port);
+    var lan_ip: u8[..64] = [];
+    {
+        var ipbuf: u8[>..] = [];
+        ipbuf.resize(64, 0);
+        let iplen = udp_local_ip(ipbuf[..]);
+        if iplen > 0 { for k in min(64, iplen) { lan_ip.push(ipbuf[k]); } }
+        else { let fb = "<YOUR_IP>"; for k in fb.len { lan_ip.push(fb[k]); } }
     }
     var s = State { .. };
     var prev = State { .. };
@@ -2421,21 +2605,28 @@ fn main() {
     inp_bits.resize(128, 0);                   // host: 32-slot seq input ring per player
     var inp_seq: i64[>..] = [];
     inp_seq.resize(128, -1);
-    let usock = if mode == "host" { udp_open(8080) } else { -1 };
+    var usock: i64 = -1;
     var upeer: i64[4] = [-1, -1, -1, -1];      // host: where each client's datagrams come from
     var uage: i64[4] = [999, 999, 999, 999];   // host: ticks since a client's last datagram
     var uok: bool[4] = [false, false, false, false]; // host: client confirmed receiving UDP snapshots
     var rbuf: u8[>..] = [];
     rbuf.resize(4096, 0);
-    let want_udp = mode == "join" && !force_tcp;
-    let csock = if want_udp { udp_open(0) } else { -1 };
-    let hostpeer = if want_udp { udp_peer(argv[2], 8080) } else { -1 };
-    let use_udp = want_udp && csock >= 0 && hostpeer >= 0;
+    var csock: i64 = -1;
+    var hostpeer: i64 = -1;
+    var use_udp = false;
     var udp_rx_age = 999; // client: ticks since last UDP snapshot received from host
     var joined = false;  // client: got the first snapshot, so we know our slot
     var lasttick = 0;
     var n_udp = 0;       // datagrams received (host: inputs, client: snapshots)
     var n_applied = 0;       // snapshots applied (from either channel)
+    var upnp_busy = false;
+    var upnp_mapped = false;
+    var upnp_code = -1;
+    var upnp_ip: u8[..64] = [];
+    var upnp_status: u8[..128] = [];
+    var host_started = false;
+    var join_started = false;
+    var lobby_err: u8[..96] = [];
     let none = http::MailAddress { .. };
     var addr: http::MailAddress[4] = [none, none, none, none];
     for i in 4 { s.players[i].kind = default_kind(i); }
@@ -2448,21 +2639,39 @@ fn main() {
     s.portals_on = 1;
     s.power_mask = PWR_ALL;
     reset_round(s, r);
-    if mode == "host" {
-        let cfg = http::Config { port: 8080, workers: 1, mail_slots: 64, mail_size: 4096, max_waiting: 16, .. };
+    var start_host = mode == GameMode.Host;
+    var start_join = mode == GameMode.Join;
+    if start_host {
+        start_host = false;
+        host_started = true;
+        usock = udp_open(host_port);
+        let cfg = http::Config { port: host_port as i32, workers: 1, mail_slots: 64, mail_size: 4096, max_waiting: 16, .. };
         thread_spawn(server, cfg);
-        var ipbuf: u8[>..] = [];
-        ipbuf.resize(64, 0);
-        let iplen = udp_local_ip(ipbuf[..]);
-        var ip: u8[>..] = [];
-        if iplen > 0 { ip.append(ipbuf[0..iplen]); } else { ip.append("<YOUR_IP>"); }
-        print("Hosting on ", ip[..], ":8080 - friends can join with:");
-        print("  Mac:     ./bomberman-portable join ", ip[..]);
-        print("  Windows: bomberman.exe join ", ip[..]);
+        var lan_disp: u8[>..] = [];
+        format_host_port(lan_ip[..], host_port, lan_disp);
+        print_join_hint("Hosting (LAN/Tailscale)", lan_disp[..]);
+        if host_net == HostNet.Upnp {
+            upnp_busy = true;
+            upnp_status.resize(0);
+            let st = "Mapping port via UPnP / NAT-PMP...";
+            for k in st.len { upnp_status.push(st[k]); }
+            thread_spawn(upnp_worker, UpnpReq { port: host_port, enable: true });
+        } else if host_net == HostNet.Playit && playit_addr.len > 0 {
+            print_join_hint("Hosting (playit.gg)", playit_addr[..]);
+        }
     }
-    if mode == "join" {
-        var url: u8[..64] = [];
-        format(url, "ws://", argv[2], ":8080/ws");
+    if start_join {
+        start_join = false;
+        join_started = true;
+        var jhost: u8[..96] = [];
+        let jport = parse_host_port(join_addr[..], jhost, 8080);
+        if !force_tcp {
+            csock = udp_open(0);
+            hostpeer = udp_peer(jhost[..], jport);
+            use_udp = csock >= 0 && hostpeer >= 0;
+        }
+        var url: u8[..128] = [];
+        format(url, "ws://", jhost[..], ":", jport, "/ws");
         thread_spawn(client, url);
         if my_name.len > 0 { qput(Profile { my_kind, my_name }); }
     }
@@ -2493,7 +2702,7 @@ fn main() {
         ui::set_scale(panel, sc);
         ui::set_scale(menu, sc);
     }
-    var menu_open = frames < 0 && my_name.len == 0;
+    var menu_open = mode != GameMode.Lobby && frames < 0 && my_name.len == 0;
     var host_open = false;
     let z = float2 { 0.0, 0.0 };
     var shown: float2[4] = [z, z, z, z];
@@ -2507,12 +2716,75 @@ fn main() {
     var frame = 0;
     while gfx::frame() {
         if frame == frames { break; }
+        // Poll background UPnP / NAT-PMP worker results without blocking the UI.
+        loop {
+            let ur, ugot = qpoll<UpnpRes>();
+            guard ugot else { break; }
+            upnp_busy = false;
+            upnp_code = ur.code;
+            upnp_status = ur.msg;
+            if ur.code == 0 || ur.code == 1 {
+                upnp_mapped = true;
+                upnp_ip = ur.pub_ip;
+                if ur.code == 0 && upnp_ip.len > 0 {
+                    var pub_disp: u8[>..] = [];
+                    format_host_port(upnp_ip[..], host_port, pub_disp);
+                    print_join_hint("Public Internet (UPnP/NAT-PMP)", pub_disp[..]);
+                } else if upnp_status.len > 0 {
+                    print("Port-forward: ", upnp_status[..]);
+                }
+            } else {
+                upnp_mapped = false;
+                upnp_ip.resize(0);
+                if upnp_status.len > 0 { print("Port-forward: ", upnp_status[..]); }
+            }
+        }
+        if start_host && !host_started {
+            start_host = false;
+            host_started = true;
+            mode = GameMode.Host;
+            s.players[0].name = my_name;
+            s.players[0].kind = my_kind;
+            usock = udp_open(host_port);
+            let cfg = http::Config { port: host_port as i32, workers: 1, mail_slots: 64, mail_size: 4096, max_waiting: 16, .. };
+            thread_spawn(server, cfg);
+            var lan_disp: u8[>..] = [];
+            format_host_port(lan_ip[..], host_port, lan_disp);
+            print_join_hint("Hosting (LAN/Tailscale)", lan_disp[..]);
+            if host_net == HostNet.Upnp && !upnp_busy {
+                upnp_busy = true;
+                upnp_status.resize(0);
+                let st = "Mapping port via UPnP / NAT-PMP...";
+                for k in st.len { upnp_status.push(st[k]); }
+                thread_spawn(upnp_worker, UpnpReq { port: host_port, enable: true });
+            } else if host_net == HostNet.Playit && playit_addr.len > 0 {
+                print_join_hint("Hosting (playit.gg)", playit_addr[..]);
+            }
+            if frames < 0 { save_prefs(my_name[..], my_kind, join_addr[..], playit_addr[..]); }
+        }
+        if start_join && !join_started {
+            start_join = false;
+            join_started = true;
+            mode = GameMode.Join;
+            var jhost: u8[..96] = [];
+            let jport = parse_host_port(join_addr[..], jhost, 8080);
+            if !force_tcp {
+                csock = udp_open(0);
+                hostpeer = udp_peer(jhost[..], jport);
+                use_udp = csock >= 0 && hostpeer >= 0;
+            }
+            var url: u8[..128] = [];
+            format(url, "ws://", jhost[..], ":", jport, "/ws");
+            thread_spawn(client, url);
+            qput(Profile { my_kind, my_name });
+            if frames < 0 { save_prefs(my_name[..], my_kind, join_addr[..], playit_addr[..]); }
+        }
         if gfx::key_pressed("Escape") {
             if host_open { host_open = false; }
             else if menu_open { menu_open = false; }
             else { break; }
         }
-        let typing = menu_open || host_open || ui::wants_keyboard(menu);
+        let typing = mode == GameMode.Lobby || menu_open || host_open || ui::wants_keyboard(menu);
         if !typing && gfx::key_pressed("N") && !own {          // cycle through all map themes + classic & dark tracks
             track = (track + 1) % 6;
             audio::stop(tune);
@@ -2524,9 +2796,11 @@ fn main() {
         ui::input_from_gfx(panel);
         ui::input_from_gfx(menu);
         if frames >= 0 { sleep(0.016); }
-        let bits = if frames >= 0 { bot(frame, if mode == "join" { 3 } else { 0 }) } else if typing { 0 as u8 } else { keys() };
+        let bits = if frames >= 0 { bot(frame, if mode == GameMode.Join { 3 } else { 0 }) } else if typing { 0 as u8 } else { keys() };
         acc += if frames >= 0 { 1.0 / 60.0 } else { min(gfx::delta_time(), 0.1) };
-        if mode == "join" {
+        if mode == GameMode.Lobby {
+            acc = 0.0;
+        } else if mode == GameMode.Join {
             if use_udp {
                 loop {          // datagram snapshots join the WebSocket's in one stream
                     var from = 0;
@@ -2780,7 +3054,7 @@ fn main() {
         }
         for i in 4 {
             let tgt = float2 { s.players[i].x as f32, s.players[i].y as f32 };
-            if mode == "join" {
+            if mode == GameMode.Join {
                 if i == s.you { shown[i] = float2 { px as f32, py as f32 }; }
                 else if abs(tgt.x - shown[i].x) + abs(tgt.y - shown[i].y) > TILE * 2.0 { shown[i] = tgt; }
                 else { shown[i] = shown[i] + (tgt - shown[i]) * 0.4; }
@@ -2804,28 +3078,178 @@ fn main() {
                 tune = audio::play(songs[track], if muted { 0.0 } else { mvol }, 0.0, 1.0, true);
             }
         }
-        draw(hud, big, s, shown, fx, if use_udp && udp_rx_age < 45 { "udp" } else { mode }, sc);
+        let draw_mode = match mode {
+            Lobby => "lobby",
+            Solo => "solo",
+            Host => "host",
+            Join => if use_udp && udp_rx_age < 45 { "udp" } else { "join" },
+        };
+        draw(hud, big, s, shown, fx, draw_mode, sc);
         let sz = gfx::screen_size();
         let vw = (sz.x as f32) / sc;
         let vh = (sz.y as f32) / sc;
-        let bar_w: f32 = if mode != "join" { 276.0 } else { 116.0 };
-        let bar_x = vw - bar_w - (if mode == "join" { 188.0 } else { 108.0 });
-        if ui::begin(panel, "Bar", ui::rect(bar_x, 5.0, bar_w, 40.0), ui::WINDOW_NO_SCROLLBAR) {
-            if mode != "join" {
-                let rat: f32[2] = [0.40, 0.60];
-                ui::layout_row(panel, ui::DYNAMIC, 32.0, rat);
-                if ui::button_label(panel, "Profile") { menu_open = !menu_open; if menu_open { host_open = false; } }
-                if ui::button_label(panel, "Host Settings") { host_open = !host_open; if host_open { menu_open = false; } }
-            } else {
-                ui::layout_row_dynamic(panel, 32.0, 1);
-                if ui::button_label(panel, "Profile") { menu_open = !menu_open; }
+        if mode != GameMode.Lobby {
+            let bar_w: f32 = if mode != GameMode.Join { 276.0 } else { 116.0 };
+            let bar_x = vw - bar_w - (if mode == GameMode.Join { 188.0 } else { 108.0 });
+            if ui::begin(panel, "Bar", ui::rect(bar_x, 5.0, bar_w, 40.0), ui::WINDOW_NO_SCROLLBAR) {
+                if mode != GameMode.Join {
+                    let rat: f32[2] = [0.40, 0.60];
+                    ui::layout_row(panel, ui::DYNAMIC, 32.0, rat);
+                    if ui::button_label(panel, "Profile") { menu_open = !menu_open; if menu_open { host_open = false; } }
+                    if ui::button_label(panel, "Host Settings") { host_open = !host_open; if host_open { menu_open = false; } }
+                } else {
+                    ui::layout_row_dynamic(panel, 32.0, 1);
+                    if ui::button_label(panel, "Profile") { menu_open = !menu_open; }
+                }
             }
+            ui::end(panel);
         }
-        ui::end(panel);
-        if host_open && mode != "join" {
-            let hw: f32 = min(640.0, vw - 24.0);
+        if mode == GameMode.Lobby {
+            let lw: f32 = min(650.0, vw - 24.0);
+            let lh: f32 = min(650.0, vh - 24.0);
+            if ui::begin(menu, "Goose Bomberman", ui::rect((vw - lw) * 0.5, (vh - lh) * 0.5, lw, lh), ui::WINDOW_BORDER | ui::WINDOW_TITLE) {
+                let nrat: f32[2] = [0.24, 0.76];
+                ui::layout_row(menu, ui::DYNAMIC, 36.0, nrat);
+                ui::label(menu, "Your Name:", ui::TEXT_LEFT);
+                ui::edit_string(menu, ui::EDIT_FIELD, my_name, ui::FILTER_ASCII);
+                ui::layout_row_dynamic(menu, 30.0, 3);
+                if ui::option_label(menu, "Goose", my_kind == Character.Goose) { my_kind = Character.Goose; }
+                if ui::option_label(menu, "Squirrel", my_kind == Character.Squirrel) { my_kind = Character.Squirrel; }
+                if ui::option_label(menu, "Baby", my_kind == Character.Baby) { my_kind = Character.Baby; }
+                ui::layout_row_dynamic(menu, 30.0, 3);
+                if ui::option_label(menu, "Cow", my_kind == Character.Cow) { my_kind = Character.Cow; }
+                if ui::option_label(menu, "Pig", my_kind == Character.Pig) { my_kind = Character.Pig; }
+                if ui::option_label(menu, "Farmer", my_kind == Character.Farmer) { my_kind = Character.Farmer; }
+
+                ui::layout_row_dynamic(menu, 42.0, 1);
+                if ui::button_label(menu, "Play Solo") {
+                    s.players[0].name = my_name;
+                    s.players[0].kind = my_kind;
+                    mode = GameMode.Solo;
+                    if frames < 0 { save_prefs(my_name[..], my_kind, join_addr[..], playit_addr[..]); }
+                }
+
+                ui::layout_row_dynamic(menu, 26.0, 1);
+                ui::label(menu, "--- Join a Friend's Game ---", ui::TEXT_LEFT);
+                let jrat: f32[2] = [0.72, 0.28];
+                ui::layout_row(menu, ui::DYNAMIC, 38.0, jrat);
+                let jed = ui::edit_string(menu, ui::EDIT_FIELD | ui::EDIT_SIG_ENTER, join_addr, ui::FILTER_ASCII);
+                let do_join = ui::button_label(menu, "Join Game") || (jed & ui::EDIT_COMMITTED) != 0;
+                ui::layout_row_dynamic(menu, 26.0, 1);
+                ui::checkbox_label(menu, "Force TCP only (default: fast UDP + TCP fallback)", force_tcp);
+                if do_join {
+                    var test_host: u8[..96] = [];
+                    parse_host_port(join_addr[..], test_host, 8080);
+                    if test_host.len == 0 {
+                        lobby_err.resize(0);
+                        let em = "Enter a host IP or host:port (e.g. 10.0.0.5 or foo.ply.gg:12345)";
+                        for k in min(96, em.len) { lobby_err.push(em[k]); }
+                    } else {
+                        lobby_err.resize(0);
+                        start_join = true;
+                    }
+                }
+                if lobby_err.len > 0 {
+                    ui::layout_row_dynamic(menu, 24.0, 1);
+                    ui::label(menu, lobby_err[..], ui::TEXT_LEFT);
+                }
+
+                ui::layout_row_dynamic(menu, 26.0, 1);
+                ui::label(menu, "--- Host a Game (Choose Networking Method) ---", ui::TEXT_LEFT);
+                ui::layout_row_dynamic(menu, 32.0, 3);
+                if ui::option_label(menu, "LAN / Tailscale", host_net == HostNet.Lan) { host_net = HostNet.Lan; }
+                if ui::option_label(menu, "UPnP Port-Fwd", host_net == HostNet.Upnp) { host_net = HostNet.Upnp; }
+                if ui::option_label(menu, "playit.gg", host_net == HostNet.Playit) { host_net = HostNet.Playit; }
+                if host_net == HostNet.Playit {
+                    let prat2: f32[2] = [0.34, 0.66];
+                    ui::layout_row(menu, ui::DYNAMIC, 36.0, prat2);
+                    ui::label(menu, "playit.gg addr:", ui::TEXT_LEFT);
+                    ui::edit_string(menu, ui::EDIT_FIELD, playit_addr, ui::FILTER_ASCII);
+                    ui::layout_row_dynamic(menu, 24.0, 1);
+                    ui::label(menu, "Point a playit.gg TCP+UDP tunnel to local port below.", ui::TEXT_LEFT);
+                } else if host_net == HostNet.Upnp {
+                    ui::layout_row_dynamic(menu, 24.0, 1);
+                    ui::label(menu, "Auto-opens router port via UPnP/NAT-PMP (closed on exit).", ui::TEXT_LEFT);
+                } else {
+                    ui::layout_row_dynamic(menu, 24.0, 1);
+                    var lnote: u8[>..] = [];
+                    format(lnote, "Local IP: ", lan_ip[..], " (same Wi-Fi, Tailscale, or manual port-fwd)");
+                    ui::label(menu, lnote[..], ui::TEXT_LEFT);
+                }
+                let hrat: f32[3] = [0.16, 0.24, 0.60];
+                ui::layout_row(menu, ui::DYNAMIC, 40.0, hrat);
+                ui::label(menu, "Port:", ui::TEXT_LEFT);
+                ui::edit_string(menu, ui::EDIT_FIELD, port_str, ui::FILTER_ASCII);
+                if ui::button_label(menu, "Start Hosting") {
+                    host_port = parse_port(port_str[..], 8080);
+                    port_str.resize(0);
+                    format(port_str, host_port);
+                    start_host = true;
+                }
+            }
+            ui::end(menu);
+        }
+        if host_open && (mode == GameMode.Host || mode == GameMode.Solo) {
+            let hw: f32 = min(650.0, vw - 24.0);
             let hh: f32 = min(660.0, vh - 24.0);
             if ui::begin(menu, "Host Settings", ui::rect((vw - hw) * 0.5, (vh - hh) * 0.5, hw, hh), ui::WINDOW_BORDER | ui::WINDOW_TITLE) {
+                if mode == GameMode.Host {
+                    ui::layout_row_dynamic(menu, 28.0, 1);
+                    ui::label(menu, "Server Networking (switch anytime):", ui::TEXT_LEFT);
+                    let prev_net = host_net;
+                    ui::layout_row_dynamic(menu, 32.0, 3);
+                    if ui::option_label(menu, "LAN / Tailscale", host_net == HostNet.Lan) { host_net = HostNet.Lan; }
+                    if ui::option_label(menu, "UPnP Port-Fwd", host_net == HostNet.Upnp) { host_net = HostNet.Upnp; }
+                    if ui::option_label(menu, "playit.gg", host_net == HostNet.Playit) { host_net = HostNet.Playit; }
+                    if host_net != prev_net {
+                        if host_net == HostNet.Upnp && !upnp_busy && !upnp_mapped {
+                            upnp_busy = true;
+                            upnp_status.resize(0);
+                            let st = "Mapping port via UPnP / NAT-PMP...";
+                            for k in st.len { upnp_status.push(st[k]); }
+                            thread_spawn(upnp_worker, UpnpReq { port: host_port, enable: true });
+                        } else if prev_net == HostNet.Upnp && upnp_mapped && !upnp_busy {
+                            upnp_busy = true;
+                            upnp_status.resize(0);
+                            let st = "Closing router port mapping...";
+                            for k in st.len { upnp_status.push(st[k]); }
+                            thread_spawn(upnp_worker, UpnpReq { port: host_port, enable: false });
+                        }
+                    }
+                    if host_net == HostNet.Playit {
+                        let prat3: f32[2] = [0.34, 0.66];
+                        ui::layout_row(menu, ui::DYNAMIC, 34.0, prat3);
+                        ui::label(menu, "playit.gg addr:", ui::TEXT_LEFT);
+                        ui::edit_string(menu, ui::EDIT_FIELD, playit_addr, ui::FILTER_ASCII);
+                    }
+                    var share_line: u8[>..] = [];
+                    var disp: u8[>..] = [];
+                    match host_net {
+                        Lan => {
+                            format_host_port(lan_ip[..], host_port, disp);
+                            format(share_line, "Join address (LAN): ", disp[..]);
+                        },
+                        Upnp => {
+                            if upnp_mapped && upnp_code == 0 && upnp_ip.len > 0 {
+                                format_host_port(upnp_ip[..], host_port, disp);
+                                format(share_line, "Public Join address: ", disp[..]);
+                            } else {
+                                format_host_port(lan_ip[..], host_port, disp);
+                                format(share_line, "LAN fallback: ", disp[..]);
+                            }
+                        },
+                        Playit => {
+                            if playit_addr.len > 0 { format(share_line, "playit.gg Join: ", playit_addr[..]); }
+                            else { format(share_line, "Point playit.gg TCP+UDP tunnel -> localhost:", host_port); }
+                        },
+                    }
+                    ui::layout_row_dynamic(menu, 26.0, 1);
+                    ui::label(menu, share_line[..], ui::TEXT_LEFT);
+                    if upnp_status.len > 0 {
+                        ui::layout_row_dynamic(menu, 24.0, 1);
+                        ui::label(menu, upnp_status[..], ui::TEXT_LEFT);
+                    }
+                }
                 ui::layout_row_dynamic(menu, 28.0, 1);
                 ui::label(menu, "Map (changes music & theme):", ui::TEXT_LEFT);
                 ui::layout_row_dynamic(menu, 34.0, 4);
@@ -2905,11 +3329,14 @@ fn main() {
                 s.power_mask = nm;
                 ui::layout_row_dynamic(menu, 38.0, 2);
                 if ui::button_label(menu, "New Round") { reset_round(s, r); host_open = false; }
-                if ui::button_label(menu, "Close") { host_open = false; }
+                if ui::button_label(menu, "Close") {
+                    host_open = false;
+                    if frames < 0 { save_prefs(my_name[..], my_kind, join_addr[..], playit_addr[..]); }
+                }
             }
             ui::end(menu);
         }
-        if menu_open {
+        if menu_open && mode != GameMode.Lobby {
             let mw: f32 = min(560.0, vw - 24.0);
             let mh: f32 = min(390.0, vh - 24.0);
             if ui::begin(menu, "Player Setup", ui::rect((vw - mw) * 0.5, (vh - mh) * 0.5, mw, mh), ui::WINDOW_BORDER | ui::WINDOW_TITLE | ui::WINDOW_NO_SCROLLBAR) {
@@ -2932,13 +3359,16 @@ fn main() {
                 let changed = my_kind != prev_kind;
                 ui::layout_row_dynamic(menu, 42.0, 1);
                 let done = ui::button_label(menu, "Play!") || (ed & ui::EDIT_COMMITTED) != 0;
-                if mode == "join" {
+                if mode == GameMode.Join {
                     if changed || (ed & ui::EDIT_ACTIVE) != 0 || done { qput(Profile { my_kind, my_name }); }
                 } else {
                     s.players[0].name = my_name;
                     s.players[0].kind = my_kind;
                 }
-                if done { menu_open = false; }
+                if done {
+                    menu_open = false;
+                    if frames < 0 { save_prefs(my_name[..], my_kind, join_addr[..], playit_addr[..]); }
+                }
             }
             ui::end(menu);
         }
@@ -2959,8 +3389,9 @@ fn main() {
         }
         frame += 1;
     }
+    if upnp_mapped { upnp_unmap(host_port); }
     for i in 4 { if s.players[i].life != Life.Off { print("player ", i, " at ", s.players[i].x / TILE, ",", s.players[i].y / TILE, " alive ", if s.players[i].life == Life.Alive { 1 } else { 0 }, " wins ", s.players[i].wins, " streak ", s.players[i].streak); } }
-    if mode != "solo" { print("datagrams ", n_udp, ", snapshots applied ", n_applied); }
+    if mode == GameMode.Host || mode == GameMode.Join { print("datagrams ", n_udp, ", snapshots applied ", n_applied); }
     ui::destroy(hud);
     ui::destroy(big);
     ui::destroy(panel);
