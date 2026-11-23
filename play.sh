@@ -29,7 +29,8 @@ if [ ! -x "$BIN" ] || { [ -n "$LATEST" ] && [ "$LATEST" != "$CUR" ]; }; then
 fi
 
 # Create/refresh clickable ~/Applications/Bomberman.app launcher
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+[ -f "$DIR/icon.icns" ] && cp "$DIR/icon.icns" "$APP/Contents/Resources/icon.icns"
 cat > "$APP/Contents/Info.plist" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -39,6 +40,7 @@ cat > "$APP/Contents/Info.plist" << 'EOF'
   <key>CFBundleDisplayName</key><string>Goose Bomberman</string>
   <key>CFBundleIdentifier</key><string>io.github.colemanbroad.bomberman</string>
   <key>CFBundleExecutable</key><string>Bomberman</string>
+  <key>CFBundleIconFile</key><string>icon.icns</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>NSHighResolutionCapable</key><true/>
@@ -53,6 +55,7 @@ REPO="colemanbroad/bomberman"
 DIR="$HOME/.bomberman"
 BIN="$DIR/bomberman-portable"
 VER_FILE="$DIR/version.txt"
+APP="$HOME/Applications/Bomberman.app"
 mkdir -p "$DIR"
 LATEST=$(curl -fsSI --max-time 4 "https://github.com/$REPO/releases/latest" 2>/dev/null \
   | awk -F/ '/^[Ll]ocation:/ {print $NF}' | tr -d '\r\n' || true)
@@ -63,6 +66,7 @@ if [ ! -x "$BIN" ] || { [ -n "$LATEST" ] && [ "$LATEST" != "$CUR" ]; }; then
     unzip -qo "$TMP_ZIP" -d "$DIR"
     chmod +x "$BIN"
     xattr -d com.apple.quarantine "$BIN" 2>/dev/null || true
+    [ -f "$DIR/icon.icns" ] && mkdir -p "$APP/Contents/Resources" && cp "$DIR/icon.icns" "$APP/Contents/Resources/icon.icns" && touch "$APP"
     [ -n "$LATEST" ] && printf '%s\n' "$LATEST" > "$VER_FILE"
   fi
   rm -f "$TMP_ZIP"
@@ -71,6 +75,7 @@ cd "$DIR"
 exec "$BIN" "$@"
 EOF
 chmod +x "$APP/Contents/MacOS/Bomberman"
+touch "$APP"
 
 echo "Installed ~/Applications/Bomberman.app (auto-updates on launch)."
 cd "$DIR"

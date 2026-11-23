@@ -78,7 +78,8 @@ try {
     $Sc.TargetPath = 'powershell.exe'
     $Sc.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Launcher`""
     $Sc.WorkingDirectory = $BinDir
-    $Sc.IconLocation = "$Exe,0"
+    $Ico = Join-Path $BinDir 'icon.ico'
+    $Sc.IconLocation = if (Test-Path $Ico) { "$Ico,0" } else { "$Exe,0" }
     $Sc.Save()
     Write-Host "Created Desktop shortcut: Bomberman (auto-updates on launch)."
 } catch { }
