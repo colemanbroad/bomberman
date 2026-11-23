@@ -33,38 +33,94 @@ let NAPALM = 480;            // napalm trail length in ticks
 let DRUNK = 900;             // drunk jitter length in ticks
 let BOMB_UNKICK: u8 = 1;
 let BOMB_WARPED: u8 = 2;
-let DEAD_NONE: u8 = 0;
-let DEAD_SHEEP: u8 = 1;      // reincarnated as controllable black sheep (blocks alive players & bombs)
-let DEAD_GHOST: u8 = 2;      // fast specter that passes through blocks and leaves fog behind
+
+enum Character { Goose, Squirrel, Baby, Cow, Pig, Farmer }
+enum Map { Island, Forest, Mountains, Desert }
+enum Dir { None, Up, Down, Left, Right }
+enum Life { Off, Alive, BlackSheep, FogGhost }
+
+fn is_dead(l: Life) -> bool { l == Life.BlackSheep || l == Life.FogGhost }
+
+fn default_kind(slot: i64) -> Character {
+    if slot == 0 { return Character.Farmer; }
+    if slot == 1 { return Character.Goose; }
+    if slot == 2 { return Character.Cow; }
+    return Character.Pig;
+}
+
+fn char_to_u8(k: Character) -> u8 {
+    match k {
+        Goose => { return 0; },
+        Squirrel => { return 1; },
+        Baby => { return 2; },
+        Cow => { return 3; },
+        Pig => { return 4; },
+        Farmer => { return 5; },
+    }
+}
+
+fn char_from_u8(v: u8) -> Character {
+    if v == 1 { return Character.Squirrel; }
+    if v == 2 { return Character.Baby; }
+    if v == 3 { return Character.Cow; }
+    if v == 4 { return Character.Pig; }
+    if v == 5 { return Character.Farmer; }
+    return Character.Goose;
+}
+
+fn map_from_int(v: i64) -> Map {
+    let m = v & 3;
+    if m == 1 { return Map.Forest; }
+    if m == 2 { return Map.Mountains; }
+    if m == 3 { return Map.Desert; }
+    return Map.Island;
+}
+
+fn map_name(m: Map) -> const u8[:] {
+    match m {
+        Island => { return "Island"; },
+        Forest => { return "Forest"; },
+        Mountains => { return "Mountains"; },
+        Desert => { return "Desert"; },
+    }
+}
+
+fn map_track(m: Map) -> i64 {
+    match m {
+        Forest => { return 0; },
+        Mountains => { return 1; },
+        Desert => { return 2; },
+        Island => { return 5; },
+    }
+}
+
+fn dir_dx(d: Dir) -> i64 {
+    match d {
+        Left => { return -1; },
+        Right => { return 1; },
+        _ => { return 0; },
+    }
+}
+
+fn dir_dy(d: Dir) -> i64 {
+    match d {
+        Up => { return -1; },
+        Down => { return 1; },
+        _ => { return 0; },
+    }
+}
+
+fn dir_from_int(v: i64) -> Dir {
+    if v == 1 { return Dir.Up; }
+    if v == 2 { return Dir.Down; }
+    if v == 3 { return Dir.Left; }
+    if v == 4 { return Dir.Right; }
+    return Dir.None;
+}
 
 // Tile values: 0 empty, 1 wall, 2 brick, 3 range+, 4 bomb+, 5 speed+, 6 steel crate (two hits), 7 gift crate (always drops),
 // 8 ghost, 9 kick, 10 missile, 11 napalm, 12 mines, 13 drunk, 14 bad/curse, 15 unkickable bombs,
 // 16..31 flame, 32..47 flame over brick, 48..63 flame over gift, 64..95 slow-decaying napalm flame, 96..127 fog cloud.
-let CHAR_GOOSE: u8 = 0;
-let CHAR_SQUIRREL: u8 = 1;
-let CHAR_BABY: u8 = 2;
-let CHAR_COW: u8 = 3;
-let CHAR_PIG: u8 = 4;
-let CHAR_FARMER: u8 = 5;
-
-fn default_kind(slot: i64) -> u8 {
-    if slot == 0 { return CHAR_FARMER; }
-    if slot == 1 { return CHAR_GOOSE; }
-    if slot == 2 { return CHAR_COW; }
-    return CHAR_PIG;
-}
-
-let MAP_ISLAND: u8 = 0;
-let MAP_FOREST: u8 = 1;
-let MAP_MOUNTAINS: u8 = 2;
-let MAP_DESERT: u8 = 3;
-
-fn map_name(m: u8) -> const u8[:] {
-    if m == MAP_ISLAND { return "Island"; }
-    if m == MAP_FOREST { return "Forest"; }
-    if m == MAP_MOUNTAINS { return "Mountains"; }
-    return "Desert";
-}
 
 let PWR_FLAME: u16 = 1;
 let PWR_BOMB: u16 = 2;
@@ -103,16 +159,16 @@ fn pick_power(mask: u16, r: rng&) -> u8 {
 }
 
 let ROBOTO: const u8[:] = embed_file("Roboto-Regular.ttf");
-struct Player { x: i64, y: i64, on: u8, alive: u8, dead_mode: u8, portal_cd: u8, bombs: u8, range: u8, speed: u8, slow: u8, wins: u8, streak: u8, bits: u8, held: u8, mine_held: u8, placed: u8, ghost: u16, napalm: u16, drunk: u16, kick: u8, unkick: u8, mines: u8, missiles: u8, kind: u8, name: u8[..12] }
-// dir: 0 still, 1 up, 2 down, 3 left, 4 right (a kicked bomb slides); m: ticks since its last step; flags: bit 0 = unkickable, bit 1 = warped.
-struct Bomb { x: u8, y: u8, t: u8, range: u8, owner: u8, dir: u8, m: u8, flags: u8 }
+struct Player { x: i64, y: i64, life: Life, portal_cd: u8, bombs: u8, range: u8, speed: u8, slow: u8, wins: u8, streak: u8, bits: u8, held: u8, mine_held: u8, placed: u8, ghost: u16, napalm: u16, drunk: u16, kick: u8, unkick: u8, mines: u8, missiles: u8, kind: Character, name: u8[..12] }
+// dir: None when still, otherwise slides; m: ticks since its last step; flags: bit 0 = unkickable, bit 1 = warped.
+struct Bomb { x: u8, y: u8, t: u8, range: u8, owner: u8, dir: Dir, m: u8, flags: u8 }
 // Proximity mine: arms down to 0, then explodes when stepped on or blasted.
 struct Mine { x: u8, y: u8, owner: u8, arm: u8 }
 // Player-steered heat-seeker missile: while active, the owner stands still wearing a headset.
-struct Missile { x: i32, y: i32, active: u8, dir: u8, portal_cd: u8, t: u16 }
-// A sheep wanders at random and blocks the way like a movable block. dir: 0 up, 1 down, 2 left, 3 right, 4 grazing.
-struct Sheep { x: i64, y: i64, alive: u8, dir: u8, t: u8, portal_cd: u8 }
-struct State { grid: u8[195], players: Player[4], bombs: Bomb[..16], mines: Mine[..8], missiles: Missile[4], sheep: Sheep[2], drops: u8, regrow: u8, map: u8, portals_on: u8, portals: u8[4], power_mask: u16, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
+struct Missile { x: i32, y: i32, active: u8, dir: Dir, portal_cd: u8, t: u16 }
+// A sheep wanders at random and blocks the way like a movable block. dir: None when grazing.
+struct Sheep { x: i64, y: i64, alive: u8, dir: Dir, t: u8, portal_cd: u8 }
+struct State { grid: u8[195], players: Player[4], bombs: Bomb[..16], mines: Mine[..8], missiles: Missile[4], sheep: Sheep[2], drops: u8, regrow: u8, map: Map, portals_on: u8, portals: u8[4], power_mask: u16, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
 
 // UDP (udp.c): inputs and snapshots fly as datagrams when a client joins with `udp`; the WebSocket stays up for
 // joining, leaving and a slow heartbeat. Each snapshot carries its tick, so stale or reordered ones are dropped.
@@ -122,11 +178,15 @@ extern fn udp_send(fd: i64, b: const u8[:], peer: i64) -> i64;
 extern fn udp_recv(fd: i64, b: u8[:], from: i64&) -> i64;
 extern fn udp_local_ip(b: u8[:]) -> i64;
 
-// Host: input or profile update from a connection (reply names it). Client: key bits or profile to send.
+// Host: input, profile update, or disconnect from a connection (reply names it). Client: key bits or profile to send.
 // seq numbers a client's input steps; the host echoes the latest one it has seen in State.ack.
-struct Msg { reply: http::MailAddress, bits: u8, leave: bool, seq: i64, is_profile: bool, kind: u8, name: u8[..12] }
+enum Msg {
+    Input { reply: http::MailAddress, bits: u8, seq: i64 },
+    Profile { reply: http::MailAddress, kind: Character, name: u8[..12] },
+    Leave { reply: http::MailAddress },
+}
 struct Pad { bits: u8, seq: i64 }
-struct Profile { kind: u8, name: u8[..12] }
+struct Profile { kind: Character, name: u8[..12] }
 struct Lost { code: i64 }
 
 fn player_name(s: State&, i: i64, out: u8[>..]&) {
@@ -180,9 +240,9 @@ fn blocked(s: State&, i: i64, x: i64, y: i64) -> bool {
     let p = s.players[i];
     for j in 4 {
         let q = s.players[j];
-        guard j != i && q.on != 0 else { continue; }
-        let holds = q.alive != 0 && (q.bits & HOLD) != 0;
-        let bsheep = q.alive == 0 && q.dead_mode == DEAD_SHEEP;
+        guard j != i else { continue; }
+        let holds = q.life == Life.Alive && (q.bits & HOLD) != 0;
+        let bsheep = q.life == Life.BlackSheep;
         guard holds || bsheep else { continue; }
         if hits(x, y, q.x, q.y) && !hits(p.x, p.y, q.x, q.y) { return true; }
     }
@@ -198,8 +258,8 @@ fn dead_sheep_blocked(s: State&, i: i64, x: i64, y: i64) -> bool {
     let me = s.players[i];
     for j in 4 {
         let q = s.players[j];
-        guard j != i && q.on != 0 else { continue; }
-        if (q.alive != 0 || q.dead_mode == DEAD_SHEEP) && hits(x, y, q.x, q.y) && !hits(me.x, me.y, q.x, q.y) { return true; }
+        guard j != i else { continue; }
+        if (q.life == Life.Alive || q.life == Life.BlackSheep) && hits(x, y, q.x, q.y) && !hits(me.x, me.y, q.x, q.y) { return true; }
     }
     for k in 2 {
         let q = s.sheep[k];
@@ -212,7 +272,7 @@ fn sheep_blocked(s: State&, k: i64, x: i64, y: i64) -> bool {
     let me = s.sheep[k];
     for j in 4 {
         let q = s.players[j];
-        if q.on != 0 && (q.alive != 0 || q.dead_mode == DEAD_SHEEP) && hits(x, y, q.x, q.y) && !hits(me.x, me.y, q.x, q.y) { return true; }
+        if (q.life == Life.Alive || q.life == Life.BlackSheep) && hits(x, y, q.x, q.y) && !hits(me.x, me.y, q.x, q.y) { return true; }
     }
     for j in 2 {
         let q = s.sheep[j];
@@ -230,10 +290,17 @@ fn reset_round(s: State&, r: rng&) {
             let is_border = cx == 0 || cy == 0;
             var is_pillar = tx % 2 == 0 && ty % 2 == 0;
             // Subtle symmetric map layout flavor per biome
-            if s.map == MAP_ISLAND && tx >= 6 && tx <= 8 && ty >= 5 && ty <= 7 { is_pillar = false; }
-            else if s.map == MAP_DESERT && (tx == 4 || tx == 10) && (ty == 4 || ty == 8) { is_pillar = false; }
-            else if s.map == MAP_MOUNTAINS && (tx == 4 || tx == 10) && ty == 6 { is_pillar = true; }
-            let density = if s.map == MAP_FOREST { 8 } else if s.map == MAP_DESERT { 6 } else { 7 };
+            match s.map {
+                Island => { if tx >= 6 && tx <= 8 && ty >= 5 && ty <= 7 { is_pillar = false; } },
+                Desert => { if (tx == 4 || tx == 10) && (ty == 4 || ty == 8) { is_pillar = false; } },
+                Mountains => { if (tx == 4 || tx == 10) && ty == 6 { is_pillar = true; } },
+                Forest => {},
+            }
+            let density = match s.map {
+                Forest => 8,
+                Desert => 6,
+                _ => 7,
+            };
             if is_border || is_pillar { g = 1; }
             else if cx + cy > 3 && r.rand_int(10) < density {
                 let k = r.rand_int(100);
@@ -245,11 +312,10 @@ fn reset_round(s: State&, r: rng&) {
     for i in 4 {
         let p = s.players[i];
         s.missiles[i] = Missile { .. };
-        if p.on == 0 { continue; }
+        if p.life == Life.Off { continue; }
         s.players[i].x = (if i % 2 == 0 { 1 } else { W - 2 }) * TILE + TILE / 2;
         s.players[i].y = (if i < 2 { 1 } else { H - 2 }) * TILE + TILE / 2;
-        s.players[i].alive = 1;
-        s.players[i].dead_mode = DEAD_NONE;
+        s.players[i].life = Life.Alive;
         s.players[i].portal_cd = 0;
         s.players[i].bombs = 1;
         s.players[i].range = 2;
@@ -269,7 +335,7 @@ fn reset_round(s: State&, r: rng&) {
     for k in 2 {
         let tx = if k == 0 { 5 } else { W - 6 };
         s.grid[(H / 2) * W + tx] = 0;
-        s.sheep[k] = Sheep { tx * TILE + TILE / 2, (H / 2) * TILE + TILE / 2, 1, 4, 0, 0 };
+        s.sheep[k] = Sheep { tx * TILE + TILE / 2, (H / 2) * TILE + TILE / 2, 1, Dir.None, 0, 0 };
     }
     // Linked portal pair on symmetric open interior tiles
     let pset = r.rand_int(3);
@@ -341,9 +407,9 @@ fn bomb_stopped(s: State&, nx: i64, ny: i64) -> bool {
     }
     for j in 4 {
         let q = s.players[j];
-        let holds = q.alive != 0 && (q.bits & HOLD) != 0;
-        let bsheep = q.alive == 0 && q.dead_mode == DEAD_SHEEP;
-        if q.on != 0 && (holds || bsheep) && abs(q.x - cx) < TILE / 2 + HB && abs(q.y - cy) < TILE / 2 + HB { return true; }
+        let holds = q.life == Life.Alive && (q.bits & HOLD) != 0;
+        let bsheep = q.life == Life.BlackSheep;
+        if (holds || bsheep) && abs(q.x - cx) < TILE / 2 + HB && abs(q.y - cy) < TILE / 2 + HB { return true; }
     }
     return false;
 }
@@ -356,10 +422,10 @@ fn step_player(s: State&, i: i64) {
     if s.players[i].portal_cd > 0 { s.players[i].portal_cd -= 1; }
     // While guiding a heat-seeker missile, the player stands stationary wearing a headset.
     if s.missiles[i].active != 0 {
-        if (bits & UP) != 0 { s.missiles[i].dir = 1; }
-        else if (bits & DOWN) != 0 { s.missiles[i].dir = 2; }
-        else if (bits & LEFT) != 0 { s.missiles[i].dir = 3; }
-        else if (bits & RIGHT) != 0 { s.missiles[i].dir = 4; }
+        if (bits & UP) != 0 { s.missiles[i].dir = Dir.Up; }
+        else if (bits & DOWN) != 0 { s.missiles[i].dir = Dir.Down; }
+        else if (bits & LEFT) != 0 { s.missiles[i].dir = Dir.Left; }
+        else if (bits & RIGHT) != 0 { s.missiles[i].dir = Dir.Right; }
         if (bits & BOMB) != 0 && s.players[i].held == 0 { s.missiles[i].t = 0; }
         s.players[i].held = if (bits & BOMB) != 0 { 1 } else { 0 };
         return;
@@ -386,8 +452,8 @@ fn step_player(s: State&, i: i64) {
     let oty = y / TILE;
     if s.players[i].kick != 0 && (dx != 0 || dy != 0) {          // running into a kickable bomb kicks it
         let b = bomb_ahead(s, i, x + dx, y + dy);
-        if b >= 0 && s.bombs[b].dir == 0 && (s.bombs[b].flags & BOMB_UNKICK) == 0 {
-            s.bombs[b].dir = if abs(dy) > abs(dx) { if dy < 0 { 1 } else { 2 } } else if dx < 0 { 3 } else { 4 };
+        if b >= 0 && s.bombs[b].dir == Dir.None && (s.bombs[b].flags & BOMB_UNKICK) == 0 {
+            s.bombs[b].dir = if abs(dy) > abs(dx) { if dy < 0 { Dir.Up } else { Dir.Down } } else if dx < 0 { Dir.Left } else { Dir.Right };
             s.bombs[b].m = 0;
         }
     }
@@ -467,7 +533,7 @@ fn step_player(s: State&, i: i64) {
     s.players[i].mine_held = if want_mine { 1 } else { 0 };
     if (bits & BOMB) != 0 && p.held == 0 && !want_mine {
         if p.missiles > 0 && s.missiles[i].active == 0 {
-            let mdir: u8 = if (bits & UP) != 0 { 1 } else if (bits & DOWN) != 0 { 2 } else if (bits & LEFT) != 0 { 3 } else if (bits & RIGHT) != 0 { 4 } else { 2 };
+            let mdir = if (bits & UP) != 0 { Dir.Up } else if (bits & DOWN) != 0 { Dir.Down } else if (bits & LEFT) != 0 { Dir.Left } else if (bits & RIGHT) != 0 { Dir.Right } else { Dir.Down };
             s.missiles[i] = Missile { s.players[i].x as i32, s.players[i].y as i32, 1, mdir, 0, 300 };
             s.players[i].missiles -= 1;
         } else if p.placed < p.bombs && bomb_at(s, tx, ty) < 0 {
@@ -480,7 +546,7 @@ fn step_player(s: State&, i: i64) {
                 by = pdst.y;
                 fl |= BOMB_WARPED;
             }
-            s.bombs.push(Bomb { bx as u8, by as u8, FUSE, p.range, i as u8, 0, 0, fl });
+            s.bombs.push(Bomb { bx as u8, by as u8, FUSE, p.range, i as u8, Dir.None, 0, fl });
             s.players[i].placed += 1;
         }
     }
@@ -493,20 +559,20 @@ fn step_dead(s: State&, i: i64) {
     if s.players[i].portal_cd > 0 { s.players[i].portal_cd -= 1; }
     // Space toggles between Black Sheep and Fog Ghost (when not inside a solid block).
     if (bits & BOMB) != 0 && s.players[i].held == 0 {
-        if s.players[i].dead_mode == DEAD_SHEEP {
-            s.players[i].dead_mode = DEAD_GHOST;
-        } else if s.players[i].dead_mode == DEAD_GHOST {
+        if s.players[i].life == Life.BlackSheep {
+            s.players[i].life = Life.FogGhost;
+        } else if s.players[i].life == Life.FogGhost {
             let tx = s.players[i].x / TILE;
             let ty = s.players[i].y / TILE;
             if tx > 0 && tx < W - 1 && ty > 0 && ty < H - 1 && !is_solid(s.grid[ty * W + tx]) && bomb_at(s, tx, ty) < 0 {
                 s.players[i].x = tx * TILE + TILE / 2;
                 s.players[i].y = ty * TILE + TILE / 2;
-                s.players[i].dead_mode = DEAD_SHEEP;
+                s.players[i].life = Life.BlackSheep;
             }
         }
     }
     s.players[i].held = if (bits & BOMB) != 0 { 1 } else { 0 };
-    let is_gh = s.players[i].dead_mode == DEAD_GHOST;
+    let is_gh = s.players[i].life == Life.FogGhost;
     let sp = if is_gh { 7 } else { 4 };
     var dx = 0;
     var dy = 0;
@@ -560,22 +626,24 @@ fn tick(s: State&, r: rng&, n: i64) {
         return;
     }
     for i in 4 {
-        if s.players[i].on != 0 {
-            if s.players[i].alive != 0 { step_player(s, i); }
-            else if s.players[i].dead_mode != DEAD_NONE { step_dead(s, i); }
+        match s.players[i].life {
+            Alive => { step_player(s, i); },
+            BlackSheep => { step_dead(s, i); },
+            FogGhost => { step_dead(s, i); },
+            Off => {},
         }
     }
     for k in 2 {
         guard s.sheep[k].alive != 0 else { continue; }
         if s.sheep[k].portal_cd > 0 { s.sheep[k].portal_cd -= 1; }
         if s.sheep[k].t == 0 {
-            s.sheep[k].dir = r.rand_int(5) as u8;
+            s.sheep[k].dir = dir_from_int(r.rand_int(5));
             s.sheep[k].t = (40 + r.rand_int(80)) as u8;
         } else { s.sheep[k].t -= 1; }
         let d = s.sheep[k].dir;
-        let dx = if d == 2 { -2 } else if d == 3 { 2 } else { 0 };
-        let dy = if d == 0 { -2 } else if d == 1 { 2 } else { 0 };
-        if d == 4 { continue; }
+        if d == Dir.None { continue; }
+        let dx = dir_dx(d) * 2;
+        let dy = dir_dy(d) * 2;
         if sheep_blocked(s, k, s.sheep[k].x + dx, s.sheep[k].y + dy) { s.sheep[k].t = 0; }
         else {
             s.sheep[k].x += dx;
@@ -592,14 +660,14 @@ fn tick(s: State&, r: rng&, n: i64) {
     }
     for i in s.bombs.len { s.bombs[i].t -= 1; }
     for i in s.bombs.len {
-        guard s.bombs[i].dir != 0 else { continue; }
+        guard s.bombs[i].dir != Dir.None else { continue; }
         s.bombs[i].m += 1;
         guard s.bombs[i].m >= SLIDE else { continue; }
         s.bombs[i].m = 0;
         let b = s.bombs[i];
-        let nx = b.x as i64 + (if b.dir == 3 { -1 } else if b.dir == 4 { 1 } else { 0 });
-        let ny = b.y as i64 + (if b.dir == 1 { -1 } else if b.dir == 2 { 1 } else { 0 });
-        if bomb_stopped(s, nx, ny) { s.bombs[i].dir = 0; }
+        let nx = b.x as i64 + dir_dx(b.dir);
+        let ny = b.y as i64 + dir_dy(b.dir);
+        if bomb_stopped(s, nx, ny) { s.bombs[i].dir = Dir.None; }
         else {
             var fx = nx;
             var fy = ny;
@@ -632,7 +700,7 @@ fn tick(s: State&, r: rng&, n: i64) {
     // Step player-steered heat-seeker missiles.
     for i in 4 {
         guard s.missiles[i].active != 0 else { continue; }
-        if s.players[i].on == 0 || s.players[i].alive == 0 {
+        if s.players[i].life != Life.Alive {
             explode_at(s, s.missiles[i].x / TILE, s.missiles[i].y / TILE, max(3, s.players[i].range as i64));
             s.missiles[i].active = 0;
             continue;
@@ -641,8 +709,8 @@ fn tick(s: State&, r: rng&, n: i64) {
         if s.missiles[i].t == 0 { boom = true; } else { s.missiles[i].t -= 1; }
         let sp = 7;
         let d = s.missiles[i].dir;
-        let dx = if d == 3 { -sp } else if d == 4 { sp } else { 0 };
-        let dy = if d == 1 { -sp } else if d == 2 { sp } else { 0 };
+        let dx = dir_dx(d) * sp;
+        let dy = dir_dy(d) * sp;
         var nx = s.missiles[i].x as i64 + dx;
         var ny = s.missiles[i].y as i64 + dy;
         // Gently align perpendicular axis toward tile center so steering into corridors feels smooth.
@@ -670,7 +738,7 @@ fn tick(s: State&, r: rng&, n: i64) {
             s.missiles[i].x = nx as i32;
             s.missiles[i].y = ny as i32;
             for j in 4 {
-                if j != i && s.players[j].on != 0 && s.players[j].alive != 0 && abs(s.players[j].x - nx) < HB + 12 && abs(s.players[j].y - ny) < HB + 12 { boom = true; }
+                if j != i && s.players[j].life == Life.Alive && abs(s.players[j].x - nx) < HB + 12 && abs(s.players[j].y - ny) < HB + 12 { boom = true; }
             }
             for k in 2 {
                 if s.sheep[k].alive != 0 && abs(s.sheep[k].x - nx) < HB + 12 && abs(s.sheep[k].y - ny) < HB + 12 { boom = true; }
@@ -692,7 +760,7 @@ fn tick(s: State&, r: rng&, n: i64) {
         }
         var trig = is_flame(s.grid[(m.y as i64) * W + (m.x as i64)]);
         for j in 4 {
-            if s.players[j].on != 0 && s.players[j].alive != 0 && s.players[j].x / TILE == m.x && s.players[j].y / TILE == m.y { trig = true; }
+            if s.players[j].life == Life.Alive && s.players[j].x / TILE == m.x && s.players[j].y / TILE == m.y { trig = true; }
         }
         for k in 2 {
             if s.sheep[k].alive != 0 && s.sheep[k].x / TILE == m.x && s.sheep[k].y / TILE == m.y { trig = true; }
@@ -750,7 +818,7 @@ fn tick(s: State&, r: rng&, n: i64) {
                     if (cur != 0 && !is_fog(cur)) || is_portal(s, tx, ty) || bomb_at(s, tx, ty) >= 0 || mine_at(s, tx, ty) >= 0 { continue; }
                     var clear = true;
                     for i in 4 {
-                        guard s.players[i].on != 0 && (s.players[i].alive != 0 || s.players[i].dead_mode == DEAD_SHEEP) else { continue; }
+                        guard s.players[i].life == Life.Alive || s.players[i].life == Life.BlackSheep else { continue; }
                         if abs(s.players[i].x / TILE - tx) <= 1 && abs(s.players[i].y / TILE - ty) <= 1 { clear = false; }
                     }
                     for k in 2 {
@@ -772,12 +840,11 @@ fn tick(s: State&, r: rng&, n: i64) {
     var alive = 0;
     var last = 0;
     for i in 4 {
-        guard s.players[i].on != 0 else { continue; }
+        guard s.players[i].life != Life.Off else { continue; }
         joined += 1;
-        if s.players[i].alive != 0 {
+        if s.players[i].life == Life.Alive {
             if is_flame(s.grid[(s.players[i].y / TILE) * W + s.players[i].x / TILE]) {
-                s.players[i].alive = 0;
-                s.players[i].dead_mode = DEAD_SHEEP;
+                s.players[i].life = Life.BlackSheep;
                 s.players[i].held = 1;
             }
             else { alive += 1; last = i; }
@@ -804,6 +871,8 @@ fn tick(s: State&, r: rng&, n: i64) {
 
 struct Conn { ws: http::WebSocket = http::WebSocket { limit: 8192, .. }, reply: http::MailAddress }
 
+fn post_msg(m: Msg) { qput(m); }
+
 fn serve_event(ev: http::Event, st: Conn&, out: http::Reply) {
     if ev.kind == http::REQUEST {
         http::ws_upgrade(ev.req, st.ws, out);
@@ -813,17 +882,17 @@ fn serve_event(ev: http::Event, st: Conn&, out: http::Reply) {
     } else if ev.kind == http::TIMEOUT {
         http::later(out, 5000);
     } else {
-        if ev.kind == http::CLOSED && st.reply.key != 0 { qput(Msg { st.reply, 0, true, 0, false, 0, [] }); }
+        if ev.kind == http::CLOSED && st.reply.key != 0 { post_msg(Msg.Leave { reply: st.reply }); }
         http::ws_read(ev, st.ws, out) { op, data, o =>
             if st.reply.key == 0 { st.reply = http::later(o, 5000); }
             if data.len >= 3 && data[0] == 255 {
-                let kd = if data[1] <= 5 { data[1] } else { 0 as u8 };
+                let kd = char_from_u8(data[1]);
                 var nm: u8[..12] = [];
                 let ln = min(data[2] as i64, min(12, data.len - 3));
                 for k in ln { nm.push(data[3 + k]); }
-                qput(Msg { st.reply, 0, false, 0, true, kd, nm });
+                post_msg(Msg.Profile { reply: st.reply, kind: kd, name: nm });
             } else if data.len >= 3 {
-                qput(Msg { st.reply, data[0], false, (data[1] as i64) | ((data[2] as i64) << 8), false, 0, [] });
+                post_msg(Msg.Input { reply: st.reply, bits: data[0], seq: (data[1] as i64) | ((data[2] as i64) << 8) });
             }
         };
     }
@@ -852,7 +921,7 @@ thread_fn client(url: u8[..64]) {
         if prof_ok {
             var pkt: u8[>..] = [];
             pkt.push(255);
-            pkt.push(prof.kind);
+            pkt.push(char_to_u8(prof.kind));
             pkt.push(prof.name.len as u8);
             for k in prof.name.len { pkt.push(prof.name[k]); }
             guard http::ws_client_binary(conn, pkt).code == 0 else { break; }
@@ -1158,7 +1227,7 @@ fn hear(prev: State&, s: State&, sfx: Sfx, fx: Fx&) {
     if prev.over == 0 && s.over > 0 {
         if s.dance_who < 4 { audio::play(sfx.dance, 0.9, 0.0, 1.0, false); }
         else {
-            for i in 4 { if s.players[i].on != 0 && s.players[i].wins > prev.players[i].wins { audio::play(sfx.win, 0.8, 0.0, 1.0, false); } }
+            for i in 4 { if s.players[i].life != Life.Off && s.players[i].wins > prev.players[i].wins { audio::play(sfx.win, 0.8, 0.0, 1.0, false); } }
         }
     }
     guard prev.over == 0 && s.over == 0 else { return; }
@@ -1194,9 +1263,9 @@ fn hear(prev: State&, s: State&, sfx: Sfx, fx: Fx&) {
     for i in 4 {
         let a = prev.players[i];
         let b = s.players[i];
-        guard a.on != 0 && b.on != 0 else { continue; }
+        guard a.life != Life.Off && b.life != Life.Off else { continue; }
         let vol = if i == s.you { 0.8 } else { 0.4 };
-        if a.alive != 0 && b.alive == 0 { audio::play(sfx.die, 0.8, pan(b.x), 1.0, false); }
+        if a.life == Life.Alive && b.life != Life.Alive { audio::play(sfx.die, 0.8, pan(b.x), 1.0, false); }
         if abs(b.x - a.x) + abs(b.y - a.y) > TILE * 2 { audio::play(sfx.warp, vol, pan(b.x), 1.0, false); }
         let got_pwr = b.range + b.bombs + b.speed + b.mines + b.missiles > a.range + a.bombs + a.speed + a.mines + a.missiles ||
                       (a.ghost == 0 && b.ghost > 0) || (a.kick == 0 && b.kick > 0) || (a.unkick == 0 && b.unkick > 0) ||
@@ -1235,120 +1304,139 @@ fn text(c: ui::Context, x: f32, y: f32, str: const u8[:], color: ui::Color) {
     ui::draw_text(c, ui::rect(x, y, 2000.0, 200.0), str, ui::font(c), ui::Color { 0, 0, 0, 0 }, color);
 }
 
-fn map_clear_color(m: u8) -> float4 {
-    if m == MAP_ISLAND { return float4 { 0.05, 0.34, 0.45, 1.0 }; }
-    if m == MAP_FOREST { return float4 { 0.07, 0.16, 0.09, 1.0 }; }
-    if m == MAP_MOUNTAINS { return float4 { 0.10, 0.14, 0.22, 1.0 }; }
-    return float4 { 0.32, 0.17, 0.08, 1.0 };
+fn map_clear_color(m: Map) -> float4 {
+    match m {
+        Island => { return float4 { 0.05, 0.34, 0.45, 1.0 }; },
+        Forest => { return float4 { 0.07, 0.16, 0.09, 1.0 }; },
+        Mountains => { return float4 { 0.10, 0.14, 0.22, 1.0 }; },
+        Desert => { return float4 { 0.32, 0.17, 0.08, 1.0 }; },
+    }
 }
 
-fn map_border_color(m: u8) -> ui::Color {
-    if m == MAP_ISLAND { return ui::rgb(26, 152, 180); }
-    if m == MAP_FOREST { return ui::rgb(30, 62, 34); }
-    if m == MAP_MOUNTAINS { return ui::rgb(46, 56, 78); }
-    return ui::rgb(138, 84, 42);
+fn map_border_color(m: Map) -> ui::Color {
+    match m {
+        Island => { return ui::rgb(26, 152, 180); },
+        Forest => { return ui::rgb(30, 62, 34); },
+        Mountains => { return ui::rgb(46, 56, 78); },
+        Desert => { return ui::rgb(138, 84, 42); },
+    }
 }
 
-fn draw_floor(c: ui::Context, m: u8, tx: i64, ty: i64, x: f32, y: f32, t: f32) {
+fn draw_floor(c: ui::Context, m: Map, tx: i64, ty: i64, x: f32, y: f32, t: f32) {
     let odd = (tx + ty) % 2 == 0;
-    if m == MAP_ISLAND {
-        let base = if odd { ui::rgb(230, 206, 150) } else { ui::rgb(220, 196, 140) };
-        ui::fill_rect(c, ui::rect(x, y, t, t), 0.0, base);
-        if (tx * 7 + ty * 13) % 11 == 0 {
-            ui::fill_circle(c, ui::rect(x + t * 0.35, y + t * 0.55, t * 0.12, t * 0.08), ui::rgb(248, 236, 208));
-        }
-    } else if m == MAP_FOREST {
-        let base = if odd { ui::rgb(78, 134, 64) } else { ui::rgb(70, 124, 58) };
-        ui::fill_rect(c, ui::rect(x, y, t, t), 0.0, base);
-        if (tx * 5 + ty * 11) % 9 == 0 {
-            ui::fill_circle(c, ui::rect(x + t * 0.25, y + t * 0.3, t * 0.1, t * 0.1), ui::rgb(245, 225, 110));
-        }
-    } else if m == MAP_MOUNTAINS {
-        let base = if odd { ui::rgb(134, 148, 170) } else { ui::rgb(144, 158, 180) };
-        ui::fill_rect(c, ui::rect(x, y, t, t), 0.0, base);
-        if (tx * 3 + ty * 17) % 10 == 0 {
-            ui::fill_rect(c, ui::rect(x + t * 0.2, y + t * 0.6, t * 0.28, t * 0.08), 2.0, ui::rgba(235, 244, 255, 140));
-        }
-    } else {
-        let base = if odd { ui::rgb(222, 170, 102) } else { ui::rgb(212, 160, 92) };
-        ui::fill_rect(c, ui::rect(x, y, t, t), 0.0, base);
-        if (tx + ty * 3) % 7 == 0 {
-            ui::stroke_line(c, x + t * 0.15, y + t * 0.5, x + t * 0.75, y + t * 0.45, 1.5, ui::rgba(178, 122, 62, 120));
-        }
+    match m {
+        Island => {
+            let base = if odd { ui::rgb(230, 206, 150) } else { ui::rgb(220, 196, 140) };
+            ui::fill_rect(c, ui::rect(x, y, t, t), 0.0, base);
+            if (tx * 7 + ty * 13) % 11 == 0 {
+                ui::fill_circle(c, ui::rect(x + t * 0.35, y + t * 0.55, t * 0.12, t * 0.08), ui::rgb(248, 236, 208));
+            }
+        },
+        Forest => {
+            let base = if odd { ui::rgb(78, 134, 64) } else { ui::rgb(70, 124, 58) };
+            ui::fill_rect(c, ui::rect(x, y, t, t), 0.0, base);
+            if (tx * 5 + ty * 11) % 9 == 0 {
+                ui::fill_circle(c, ui::rect(x + t * 0.25, y + t * 0.3, t * 0.1, t * 0.1), ui::rgb(245, 225, 110));
+            }
+        },
+        Mountains => {
+            let base = if odd { ui::rgb(134, 148, 170) } else { ui::rgb(144, 158, 180) };
+            ui::fill_rect(c, ui::rect(x, y, t, t), 0.0, base);
+            if (tx * 3 + ty * 17) % 10 == 0 {
+                ui::fill_rect(c, ui::rect(x + t * 0.2, y + t * 0.6, t * 0.28, t * 0.08), 2.0, ui::rgba(235, 244, 255, 140));
+            }
+        },
+        Desert => {
+            let base = if odd { ui::rgb(222, 170, 102) } else { ui::rgb(212, 160, 92) };
+            ui::fill_rect(c, ui::rect(x, y, t, t), 0.0, base);
+            if (tx + ty * 3) % 7 == 0 {
+                ui::stroke_line(c, x + t * 0.15, y + t * 0.5, x + t * 0.75, y + t * 0.45, 1.5, ui::rgba(178, 122, 62, 120));
+            }
+        },
     }
 }
 
-fn draw_wall(c: ui::Context, m: u8, x: f32, y: f32, t: f32) {
-    if m == MAP_ISLAND {
-        // Tropical volcanic rock + lush palm fronds
-        ui::fill_rect(c, ui::rect(x, y, t, t), 5.0, ui::rgb(104, 96, 86));
-        ui::fill_rect(c, ui::rect(x + t * 0.08, y + t * 0.08, t * 0.84, t * 0.2), 3.0, ui::rgb(142, 134, 120));
-        ui::fill_circle(c, ui::rect(x + t * 0.22, y + t * 0.16, t * 0.56, t * 0.52), ui::rgb(42, 148, 68));
-        ui::fill_triangle(c, x + t * 0.5, y + t * 0.42, x + t * 0.06, y + t * 0.2, x + t * 0.26, y + t * 0.54, ui::rgb(58, 174, 82));
-        ui::fill_triangle(c, x + t * 0.5, y + t * 0.42, x + t * 0.94, y + t * 0.2, x + t * 0.74, y + t * 0.54, ui::rgb(58, 174, 82));
-        ui::fill_circle(c, ui::rect(x + t * 0.42, y + t * 0.42, t * 0.16, t * 0.16), ui::rgb(120, 74, 38));
-    } else if m == MAP_FOREST {
-        // Tall layered pine tree on mossy soil
-        ui::fill_rect(c, ui::rect(x, y, t, t), 4.0, ui::rgb(42, 74, 38));
-        ui::fill_rect(c, ui::rect(x + t * 0.4, y + t * 0.62, t * 0.2, t * 0.3), 2.0, ui::rgb(96, 62, 36));
-        ui::fill_triangle(c, x + t * 0.5, y + t * 0.08, x + t * 0.9, y + t * 0.72, x + t * 0.1, y + t * 0.72, ui::rgb(28, 92, 46));
-        ui::fill_triangle(c, x + t * 0.5, y + t * 0.06, x + t * 0.8, y + t * 0.5, x + t * 0.2, y + t * 0.5, ui::rgb(44, 124, 62));
-    } else if m == MAP_MOUNTAINS {
-        // Jagged snow-capped alpine peak
-        ui::fill_rect(c, ui::rect(x, y, t, t), 4.0, ui::rgb(68, 78, 98));
-        ui::fill_triangle(c, x + t * 0.5, y + t * 0.08, x + t * 0.94, y + t * 0.92, x + t * 0.06, y + t * 0.92, ui::rgb(96, 108, 130));
-        ui::fill_triangle(c, x + t * 0.5, y + t * 0.08, x + t * 0.7, y + t * 0.46, x + t * 0.3, y + t * 0.46, ui::rgb(242, 248, 255));
-        ui::stroke_rect(c, ui::rect(x + 1.0, y + 1.0, t - 2.0, t - 2.0), 4.0, 1.5, ui::rgb(52, 60, 76));
-    } else {
-        // Carved desert sandstone pillar
-        ui::fill_rect(c, ui::rect(x, y, t, t), 3.0, ui::rgb(176, 126, 72));
-        ui::fill_rect(c, ui::rect(x, y, t, t * 0.16), 3.0, ui::rgb(218, 172, 110));
-        ui::fill_rect(c, ui::rect(x, y + t * 0.84, t, t * 0.16), 3.0, ui::rgb(126, 82, 42));
-        ui::stroke_rect(c, ui::rect(x + t * 0.18, y + t * 0.22, t * 0.64, t * 0.56), 2.0, 2.0, ui::rgb(132, 86, 44));
-        ui::fill_triangle(c, x + t * 0.5, y + t * 0.3, x + t * 0.7, y + t * 0.68, x + t * 0.3, y + t * 0.68, ui::rgb(198, 148, 88));
+fn draw_wall(c: ui::Context, m: Map, x: f32, y: f32, t: f32) {
+    match m {
+        Island => {
+            // Tropical volcanic rock + lush palm fronds
+            ui::fill_rect(c, ui::rect(x, y, t, t), 5.0, ui::rgb(104, 96, 86));
+            ui::fill_rect(c, ui::rect(x + t * 0.08, y + t * 0.08, t * 0.84, t * 0.2), 3.0, ui::rgb(142, 134, 120));
+            ui::fill_circle(c, ui::rect(x + t * 0.22, y + t * 0.16, t * 0.56, t * 0.52), ui::rgb(42, 148, 68));
+            ui::fill_triangle(c, x + t * 0.5, y + t * 0.42, x + t * 0.06, y + t * 0.2, x + t * 0.26, y + t * 0.54, ui::rgb(58, 174, 82));
+            ui::fill_triangle(c, x + t * 0.5, y + t * 0.42, x + t * 0.94, y + t * 0.2, x + t * 0.74, y + t * 0.54, ui::rgb(58, 174, 82));
+            ui::fill_circle(c, ui::rect(x + t * 0.42, y + t * 0.42, t * 0.16, t * 0.16), ui::rgb(120, 74, 38));
+        },
+        Forest => {
+            // Tall layered pine tree on mossy soil
+            ui::fill_rect(c, ui::rect(x, y, t, t), 4.0, ui::rgb(42, 74, 38));
+            ui::fill_rect(c, ui::rect(x + t * 0.4, y + t * 0.62, t * 0.2, t * 0.3), 2.0, ui::rgb(96, 62, 36));
+            ui::fill_triangle(c, x + t * 0.5, y + t * 0.08, x + t * 0.9, y + t * 0.72, x + t * 0.1, y + t * 0.72, ui::rgb(28, 92, 46));
+            ui::fill_triangle(c, x + t * 0.5, y + t * 0.06, x + t * 0.8, y + t * 0.5, x + t * 0.2, y + t * 0.5, ui::rgb(44, 124, 62));
+        },
+        Mountains => {
+            // Jagged snow-capped alpine peak
+            ui::fill_rect(c, ui::rect(x, y, t, t), 4.0, ui::rgb(68, 78, 98));
+            ui::fill_triangle(c, x + t * 0.5, y + t * 0.08, x + t * 0.94, y + t * 0.92, x + t * 0.06, y + t * 0.92, ui::rgb(96, 108, 130));
+            ui::fill_triangle(c, x + t * 0.5, y + t * 0.08, x + t * 0.7, y + t * 0.46, x + t * 0.3, y + t * 0.46, ui::rgb(242, 248, 255));
+            ui::stroke_rect(c, ui::rect(x + 1.0, y + 1.0, t - 2.0, t - 2.0), 4.0, 1.5, ui::rgb(52, 60, 76));
+        },
+        Desert => {
+            // Carved desert sandstone pillar
+            ui::fill_rect(c, ui::rect(x, y, t, t), 3.0, ui::rgb(176, 126, 72));
+            ui::fill_rect(c, ui::rect(x, y, t, t * 0.16), 3.0, ui::rgb(218, 172, 110));
+            ui::fill_rect(c, ui::rect(x, y + t * 0.84, t, t * 0.16), 3.0, ui::rgb(126, 82, 42));
+            ui::stroke_rect(c, ui::rect(x + t * 0.18, y + t * 0.22, t * 0.64, t * 0.56), 2.0, 2.0, ui::rgb(132, 86, 44));
+            ui::fill_triangle(c, x + t * 0.5, y + t * 0.3, x + t * 0.7, y + t * 0.68, x + t * 0.3, y + t * 0.68, ui::rgb(198, 148, 88));
+        },
     }
 }
 
-fn draw_brick(c: ui::Context, m: u8, x: f32, y: f32, t: f32) {
-    if m == MAP_ISLAND {
-        // Bamboo / driftwood crate
-        ui::fill_rect(c, ui::rect(x, y, t, t), 5.0, ui::rgb(184, 146, 76));
-        for k in 4 {
-            let xx = x + t * (0.12 + 0.24 * k);
-            ui::fill_rect(c, ui::rect(xx, y + t * 0.08, t * 0.16, t * 0.84), 3.0, ui::rgb(208, 174, 96));
-        }
-        ui::fill_rect(c, ui::rect(x + t * 0.06, y + t * 0.32, t * 0.88, t * 0.1), 2.0, ui::rgb(126, 92, 46));
-        ui::fill_rect(c, ui::rect(x + t * 0.06, y + t * 0.62, t * 0.88, t * 0.1), 2.0, ui::rgb(126, 92, 46));
-        ui::stroke_rect(c, ui::rect(x, y, t, t), 5.0, 2.0, ui::rgb(106, 78, 36));
-    } else if m == MAP_FOREST {
-        // Stacked wooden timber logs
-        ui::fill_rect(c, ui::rect(x, y, t, t), 5.0, ui::rgb(114, 72, 42));
-        for r in 3 {
-            let yy = y + t * (0.06 + 0.31 * r);
-            ui::fill_rect(c, ui::rect(x + t * 0.06, yy, t * 0.88, t * 0.25), t * 0.12, ui::rgb(148, 96, 56));
-            ui::fill_circle(c, ui::rect(x + t * 0.72, yy + t * 0.03, t * 0.18, t * 0.18), ui::rgb(208, 166, 114));
-        }
-        ui::stroke_rect(c, ui::rect(x, y, t, t), 5.0, 2.0, ui::rgb(74, 46, 26));
-    } else if m == MAP_MOUNTAINS {
-        // Frosted boulder / ice block
-        ui::fill_rect(c, ui::rect(x, y, t, t), 6.0, ui::rgb(154, 198, 228));
-        ui::fill_rect(c, ui::rect(x + t * 0.08, y + t * 0.08, t * 0.84, t * 0.22), 4.0, ui::rgb(218, 240, 255));
-        ui::stroke_line(c, x + t * 0.2, y + t * 0.35, x + t * 0.55, y + t * 0.6, 2.0, ui::rgb(96, 140, 174));
-        ui::stroke_line(c, x + t * 0.55, y + t * 0.6, x + t * 0.8, y + t * 0.45, 2.0, ui::rgb(96, 140, 174));
-        ui::stroke_rect(c, ui::rect(x, y, t, t), 6.0, 2.0, ui::rgb(82, 118, 150));
-    } else {
-        // Terracotta adobe bricks
-        let mortar = ui::rgb(122, 62, 34);
-        ui::fill_rect(c, ui::rect(x, y, t, t), 4.0, ui::rgb(196, 108, 62));
-        ui::fill_rect(c, ui::rect(x, y, t, t * 0.1), 4.0, ui::rgb(226, 140, 92));
-        for r in 3 {
-            let yy = y + t * (r as f32) / 3.0;
-            if r > 0 { ui::stroke_line(c, x, yy, x + t, yy, 2.0, mortar); }
-            let off = if r % 2 == 0 { 0.5 } else { 0.25 };
-            ui::stroke_line(c, x + t * off, yy, x + t * off, yy + t / 3.0, 2.0, mortar);
-            if r % 2 == 1 { ui::stroke_line(c, x + t * 0.75, yy, x + t * 0.75, yy + t / 3.0, 2.0, mortar); }
-        }
-        ui::stroke_rect(c, ui::rect(x, y, t, t), 4.0, 2.0, ui::rgb(104, 52, 28));
+fn draw_brick(c: ui::Context, m: Map, x: f32, y: f32, t: f32) {
+    match m {
+        Island => {
+            // Bamboo / driftwood crate
+            ui::fill_rect(c, ui::rect(x, y, t, t), 5.0, ui::rgb(184, 146, 76));
+            for k in 4 {
+                let xx = x + t * (0.12 + 0.24 * k);
+                ui::fill_rect(c, ui::rect(xx, y + t * 0.08, t * 0.16, t * 0.84), 3.0, ui::rgb(208, 174, 96));
+            }
+            ui::fill_rect(c, ui::rect(x + t * 0.06, y + t * 0.32, t * 0.88, t * 0.1), 2.0, ui::rgb(126, 92, 46));
+            ui::fill_rect(c, ui::rect(x + t * 0.06, y + t * 0.62, t * 0.88, t * 0.1), 2.0, ui::rgb(126, 92, 46));
+            ui::stroke_rect(c, ui::rect(x, y, t, t), 5.0, 2.0, ui::rgb(106, 78, 36));
+        },
+        Forest => {
+            // Stacked wooden timber logs
+            ui::fill_rect(c, ui::rect(x, y, t, t), 5.0, ui::rgb(114, 72, 42));
+            for r in 3 {
+                let yy = y + t * (0.06 + 0.31 * r);
+                ui::fill_rect(c, ui::rect(x + t * 0.06, yy, t * 0.88, t * 0.25), t * 0.12, ui::rgb(148, 96, 56));
+                ui::fill_circle(c, ui::rect(x + t * 0.72, yy + t * 0.03, t * 0.18, t * 0.18), ui::rgb(208, 166, 114));
+            }
+            ui::stroke_rect(c, ui::rect(x, y, t, t), 5.0, 2.0, ui::rgb(74, 46, 26));
+        },
+        Mountains => {
+            // Frosted boulder / ice block
+            ui::fill_rect(c, ui::rect(x, y, t, t), 6.0, ui::rgb(154, 198, 228));
+            ui::fill_rect(c, ui::rect(x + t * 0.08, y + t * 0.08, t * 0.84, t * 0.22), 4.0, ui::rgb(218, 240, 255));
+            ui::stroke_line(c, x + t * 0.2, y + t * 0.35, x + t * 0.55, y + t * 0.6, 2.0, ui::rgb(96, 140, 174));
+            ui::stroke_line(c, x + t * 0.55, y + t * 0.6, x + t * 0.8, y + t * 0.45, 2.0, ui::rgb(96, 140, 174));
+            ui::stroke_rect(c, ui::rect(x, y, t, t), 6.0, 2.0, ui::rgb(82, 118, 150));
+        },
+        Desert => {
+            // Terracotta adobe bricks
+            let mortar = ui::rgb(122, 62, 34);
+            ui::fill_rect(c, ui::rect(x, y, t, t), 4.0, ui::rgb(196, 108, 62));
+            ui::fill_rect(c, ui::rect(x, y, t, t * 0.1), 4.0, ui::rgb(226, 140, 92));
+            for r in 3 {
+                let yy = y + t * (r as f32) / 3.0;
+                if r > 0 { ui::stroke_line(c, x, yy, x + t, yy, 2.0, mortar); }
+                let off = if r % 2 == 0 { 0.5 } else { 0.25 };
+                ui::stroke_line(c, x + t * off, yy, x + t * off, yy + t / 3.0, 2.0, mortar);
+                if r % 2 == 1 { ui::stroke_line(c, x + t * 0.75, yy, x + t * 0.75, yy + t / 3.0, 2.0, mortar); }
+            }
+            ui::stroke_rect(c, ui::rect(x, y, t, t), 4.0, 2.0, ui::rgb(104, 52, 28));
+        },
     }
 }
 
@@ -1755,7 +1843,7 @@ fn draw_farmer(c: ui::Context, owner: i64, x: f32, y: f32, k: f32, fx: f32, fy: 
 
 fn draw_sheep(c: ui::Context, q: Sheep, x: f32, y: f32, t: f32, tm: f32) {
     let k = t * 0.8;
-    let bob = if q.dir < 4 { 0.03 * t * sin(tm * 14.0) } else { 0.0 };
+    let bob = if q.dir != Dir.None { 0.03 * t * sin(tm * 14.0) } else { 0.0 };
     let wool = ui::rgb(245, 244, 238);
     ui::fill_circle(c, ui::rect(x - k * 0.55, y + k * 0.25, k * 1.1, k * 0.35), ui::rgba(0, 0, 0, 100));
     for l in 2 { ui::fill_rect(c, ui::rect(x - k * 0.26 + l * k * 0.32, y + k * 0.28, k * 0.1, k * 0.2), 2.0, ui::rgb(50, 46, 50)); }
@@ -1778,21 +1866,18 @@ fn draw_bomb(c: ui::Context, s: State&, b: Bomb, ox: f32, oy: f32, t: f32, tm: f
     let k = (0.72 + 0.06 * sin(tm * 10.0 + b.t)) * t;
     var cx = ox + (b.x + 0.5) * t;
     var cy = oy + (b.y + 0.5) * t;
-    if b.dir != 0 {      // glide in from the tile it just left
+    if b.dir != Dir.None {      // glide in from the tile it just left
         let sl = (1.0 - (b.m as f32) / SLIDE) * t;
-        if b.dir == 1 { cy += sl; } else if b.dir == 2 { cy -= sl; } else if b.dir == 3 { cx += sl; } else { cx -= sl; }
+        cx -= dir_dx(b.dir) * sl;
+        cy -= dir_dy(b.dir) * sl;
     }
-    let kd = s.players[b.owner].kind;
-    if kd == CHAR_GOOSE { draw_egg(c, b, cx, cy, k, tm); }
-    else if kd == CHAR_SQUIRREL { draw_acorn(c, b, cx, cy, k, tm); }
-    else if kd == CHAR_BABY { draw_diaper(c, b, cx, cy, k, tm); }
-    else if kd == CHAR_COW { draw_patty(c, b, cx, cy, k, tm); }
-    else if kd == CHAR_PIG { draw_bacon(c, b, cx, cy, k, tm); }
-    else if kd == CHAR_FARMER { draw_haybale(c, b, cx, cy, k, tm); }
-    else {
-        ui::fill_circle(c, ui::rect(cx - k * 0.5, cy + k * 0.2, k, k * 0.4), ui::rgba(0, 0, 0, 90));
-        ui::fill_circle(c, ui::rect(cx - k * 0.5, cy - k * 0.5, k, k), if b.t < 45 && (b.t / 6) % 2 == 0 { ui::rgb(120, 25, 25) } else { ui::rgb(22, 22, 30) });
-        ui::stroke_circle(c, ui::rect(cx - k * 0.5, cy - k * 0.5, k, k), 3.0, col(b.owner));
+    match s.players[b.owner].kind {
+        Goose => { draw_egg(c, b, cx, cy, k, tm); },
+        Squirrel => { draw_acorn(c, b, cx, cy, k, tm); },
+        Baby => { draw_diaper(c, b, cx, cy, k, tm); },
+        Cow => { draw_patty(c, b, cx, cy, k, tm); },
+        Pig => { draw_bacon(c, b, cx, cy, k, tm); },
+        Farmer => { draw_haybale(c, b, cx, cy, k, tm); },
     }
     // Unkickable bomb: heavy iron anchor rim + four steel studs
     if (b.flags & BOMB_UNKICK) != 0 {
@@ -1833,8 +1918,8 @@ fn draw_missile(c: ui::Context, m: Missile, owner: i64, ox: f32, oy: f32, t: f32
     let cx = ox + (m.x as f32) / TILE * t;
     let cy = oy + (m.y as f32) / TILE * t;
     let k = t * 0.65;
-    let dx: f32 = if m.dir == 3 { -1.0 } else if m.dir == 4 { 1.0 } else { 0.0 };
-    let dy: f32 = if m.dir == 1 { -1.0 } else if m.dir == 2 { 1.0 } else { 0.0 };
+    let dx: f32 = dir_dx(m.dir);
+    let dy: f32 = dir_dy(m.dir);
     let px = -dy;
     let py = dx;
     // Rocket exhaust flame behind missile
@@ -1870,13 +1955,15 @@ fn draw_headset(c: ui::Context, x: f32, y: f32, k: f32, tm: f32) {
     ui::fill_circle(c, ui::rect(x + k * 0.44, y - k * 0.84, k * 0.12, k * 0.12), if on { ui::rgb(255, 60, 50) } else { ui::rgb(120, 30, 30) });
 }
 
-fn draw_character(c: ui::Context, kind: u8, owner: i64, x: f32, y: f32, k: f32, fx: f32, fy: f32, walk: f32) {
-    if kind == CHAR_GOOSE { draw_goose(c, owner, x, y, k, fx, fy, walk); return; }
-    if kind == CHAR_SQUIRREL { draw_squirrel(c, owner, x, y, k, fx, fy, walk); return; }
-    if kind == CHAR_BABY { draw_baby(c, owner, x, y, k, fx, fy, walk); return; }
-    if kind == CHAR_COW { draw_cow(c, owner, x, y, k, fx, fy, walk); return; }
-    if kind == CHAR_PIG { draw_pig(c, owner, x, y, k, fx, fy, walk); return; }
-    draw_farmer(c, owner, x, y, k, fx, fy, walk);
+fn draw_character(c: ui::Context, kind: Character, owner: i64, x: f32, y: f32, k: f32, fx: f32, fy: f32, walk: f32) {
+    match kind {
+        Goose => { draw_goose(c, owner, x, y, k, fx, fy, walk); },
+        Squirrel => { draw_squirrel(c, owner, x, y, k, fx, fy, walk); },
+        Baby => { draw_baby(c, owner, x, y, k, fx, fy, walk); },
+        Cow => { draw_cow(c, owner, x, y, k, fx, fy, walk); },
+        Pig => { draw_pig(c, owner, x, y, k, fx, fy, walk); },
+        Farmer => { draw_farmer(c, owner, x, y, k, fx, fy, walk); },
+    }
 }
 
 fn draw_player(c: ui::Context, s: State&, i: i64, x: f32, y: f32, t: f32, tm: f32) {
@@ -2119,18 +2206,19 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
             ui::fill_circle(hud, ui::rect(ox + d.x / TILE * t - r, oy + d.y / TILE * t - r - d.z * 0.25, r * 2.0, r * 2.0), ui::rgba(220, 215, 200, (50.0 * a) as i64));
         }
         for i in 4 {
-            if s.players[i].on != 0 {
+            let life = s.players[i].life;
+            if life != Life.Off {
                 let px = ox + shown[i].x / TILE * t;
                 let py = oy + shown[i].y / TILE * t;
-                if s.players[i].alive != 0 { draw_player(hud, s, i, px, py, t, tm); }
-                else if s.players[i].dead_mode == DEAD_SHEEP { draw_black_sheep(hud, s, i, px, py, t, tm); }
+                if life == Life.Alive { draw_player(hud, s, i, px, py, t, tm); }
+                else if life == Life.BlackSheep { draw_black_sheep(hud, s, i, px, py, t, tm); }
             }
         }
         for i in 4 {
             if s.missiles[i].active != 0 { draw_missile(hud, s.missiles[i], i, ox, oy, t, tm); }
         }
         // Fog clouds drawn OVER the arena so Fog Ghosts genuinely obscure vision!
-        let viewer_ghost = s.players[s.you].alive == 0 && s.players[s.you].dead_mode == DEAD_GHOST;
+        let viewer_ghost = s.players[s.you].life == Life.FogGhost;
         for ty in H {
             for tx in W {
                 let g = s.grid[ty * W + tx];
@@ -2139,25 +2227,30 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
         }
         // Dead Fog Ghosts float above the fog clouds
         for i in 4 {
-            if s.players[i].on != 0 && s.players[i].alive == 0 && s.players[i].dead_mode == DEAD_GHOST {
+            if s.players[i].life == Life.FogGhost {
                 draw_fog_ghost(hud, s, i, ox + shown[i].x / TILE * t, oy + shown[i].y / TILE * t, t, tm);
             }
         }
         // Bottom status strip for active power-ups or post-death controls
         let me = s.players[s.you];
         var st: u8[>..] = [];
-        if me.alive == 0 && me.dead_mode == DEAD_SHEEP {
-            st.append("BLACK SHEEP (block alive players!)  -  [Space] Switch to Fog Ghost");
-        } else if me.alive == 0 && me.dead_mode == DEAD_GHOST {
-            st.append("FOG GHOST (fast, phase through walls, leave fog!)  -  [Space] Switch to Black Sheep");
-        } else if me.alive != 0 {
-            if s.missiles[s.you].active != 0 { st.append("GUIDING MISSILE (Arrows/WASD steer, Space detonate)  "); }
-            else if me.missiles > 0 { format(st, "Missile x", me.missiles, " [Space]  "); }
-            if me.mines > 0 { format(st, "Mines x", me.mines, " [E/X]  "); }
-            if me.napalm > 0 { st.append("NAPALM  "); }
-            if me.drunk > 0 { st.append("DRUNK!  "); }
-            if me.unkick != 0 { st.append("AnchorBombs  "); }
-            if me.slow > 0 { st.append("CURSED(Slow+Range)  "); }
+        match me.life {
+            BlackSheep => {
+                st.append("BLACK SHEEP (block alive players!)  -  [Space] Switch to Fog Ghost");
+            },
+            FogGhost => {
+                st.append("FOG GHOST (fast, phase through walls, leave fog!)  -  [Space] Switch to Black Sheep");
+            },
+            Alive => {
+                if s.missiles[s.you].active != 0 { st.append("GUIDING MISSILE (Arrows/WASD steer, Space detonate)  "); }
+                else if me.missiles > 0 { format(st, "Missile x", me.missiles, " [Space]  "); }
+                if me.mines > 0 { format(st, "Mines x", me.mines, " [E/X]  "); }
+                if me.napalm > 0 { st.append("NAPALM  "); }
+                if me.drunk > 0 { st.append("DRUNK!  "); }
+                if me.unkick != 0 { st.append("AnchorBombs  "); }
+                if me.slow > 0 { st.append("CURSED(Slow+Range)  "); }
+            },
+            Off => {},
         }
         if st.len > 0 {
             let sw0 = ui::text_width(ui::font(hud), st);
@@ -2167,7 +2260,7 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
         ui::fill_rect(hud, ui::rect(0, 0, vw, top - 8.0), 0.0, ui::rgba(10, 12, 20, 205));
         var x: f32 = 14.0;
         for i in 4 {
-            guard s.players[i].on != 0 else { continue; }
+            guard s.players[i].life != Life.Off else { continue; }
             var nm: u8[>..] = [];
             player_name(s, i, nm);
             var line: u8[>..] = [];
@@ -2176,7 +2269,7 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
             let lw = ui::text_width(ui::font(hud), line);
             let boxw = max(108.0, lw + 38.0);
             marker(hud, i, x + 12.0, 24.0, 10.0);
-            text(hud, x + 28.0, 10.0, line, if s.players[i].alive != 0 { ui::rgb(240, 240, 245) } else { ui::rgb(120, 124, 140) });
+            text(hud, x + 28.0, 10.0, line, if s.players[i].life == Life.Alive { ui::rgb(240, 240, 245) } else { ui::rgb(120, 124, 140) });
             if i == s.you && mode != "solo" { ui::stroke_rect(hud, ui::rect(x - 6.0, 4.0, boxw, 40.0), 7.0, 2.5, ui::rgb(255, 255, 255)); }
             x += boxw + 12.0;
         }
@@ -2200,9 +2293,9 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
             text(big, (vw - tw) * 0.5, 42.0, title, col(who));
         } else {
             var who = -1;
-            for i in 4 { if s.players[i].on != 0 && s.players[i].alive != 0 { who = i; } }
+            for i in 4 { if s.players[i].life == Life.Alive { who = i; } }
             var msg: u8[>..] = [];
-            if who >= 0 && s.players[who].on != 0 {
+            if who >= 0 && s.players[who].life != Life.Off {
                 var nm: u8[>..] = [];
                 player_name(s, who, nm);
                 if s.players[who].streak >= 2 { format(msg, nm[..], " WINS! (", s.players[who].streak, "x)"); }
@@ -2294,14 +2387,14 @@ fn main() {
     let mode = if argv.len > 1 { argv[1] } else { "solo" };
     guard mode == "solo" || mode == "host" || (mode == "join" && argv.len > 2) else { abort("usage: bomberman [solo | host | join HOST]"); }
     var frames = -1;
-    var init_map: u8 = MAP_ISLAND;
+    var init_map: Map = Map.Island;
     var force_tcp = false;
     var my_name: u8[..12] = [];
-    var my_kind: u8 = if mode == "join" { CHAR_GOOSE } else { default_kind(0) };
+    var my_kind: Character = if mode == "join" { Character.Goose } else { default_kind(0) };
     for i in argv.len {
         if argv[i] == "tcp" { force_tcp = true; }
         if argv[i] == "--frames" && i + 1 < argv.len { frames = parse_int(argv[i + 1]); }
-        if argv[i] == "--map" && i + 1 < argv.len { init_map = (parse_int(argv[i + 1]) & 3) as u8; }
+        if argv[i] == "--map" && i + 1 < argv.len { init_map = map_from_int(parse_int(argv[i + 1])); }
         if argv[i] == "--name" && i + 1 < argv.len {
             my_name.resize(0);
             let ln = min(12, argv[i + 1].len);
@@ -2335,7 +2428,7 @@ fn main() {
     let none = http::MailAddress { .. };
     var addr: http::MailAddress[4] = [none, none, none, none];
     for i in 4 { s.players[i].kind = default_kind(i); }
-    s.players[0].on = 1;
+    s.players[0].life = Life.Alive;
     s.players[0].name = my_name;
     s.players[0].kind = my_kind;
     s.drops = 33;
@@ -2454,9 +2547,9 @@ fn main() {
                 } else {
                     var c = s;
                     let back = min((seq - s.ack) & 65535, hist.len);
-                    if c.players[s.you].alive != 0 {
+                    if c.players[s.you].life == Life.Alive {
                         for j in hist.len - back..hist.len { c.players[s.you].bits = hist[j]; step_player(c, s.you); }
-                    } else if c.players[s.you].dead_mode != DEAD_NONE {
+                    } else if is_dead(c.players[s.you].life) {
                         for j in hist.len - back..hist.len { c.players[s.you].bits = hist[j]; step_dead(c, s.you); }
                     }
                     let ex = c.players[s.you].x - px;
@@ -2485,8 +2578,8 @@ fn main() {
                     c.players[s.you].x = px;
                     c.players[s.you].y = py;
                     c.players[s.you].bits = bits;
-                    if c.players[s.you].alive != 0 { step_player(c, s.you); }
-                    else if c.players[s.you].dead_mode != DEAD_NONE { step_dead(c, s.you); }
+                    if c.players[s.you].life == Life.Alive { step_player(c, s.you); }
+                    else if is_dead(c.players[s.you].life) { step_dead(c, s.you); }
                     px = c.players[s.you].x;
                     py = c.players[s.you].y;
                 }
@@ -2509,14 +2602,20 @@ fn main() {
             loop {
                 let m, ok = qpoll<Msg>();
                 guard ok else { break; }
+                var reply = none;
+                var is_leave = false;
+                match m {
+                    Input inp => { reply = inp.reply; },
+                    Profile pr => { reply = pr.reply; },
+                    Leave lv => { reply = lv.reply; is_leave = true; },
+                }
                 var who = -1;
-                for i in 1..4 { if s.players[i].on != 0 && addr[i].key == m.reply.key { who = i; } }
-                if who >= 0 && uage[who] < 30 && !m.leave && !m.is_profile { continue; }   // UDP is carrying this player's input
-                if who < 0 && !m.leave {
-                    for i in 1..4 { if who < 0 && s.players[i].on == 0 { who = i; } }
+                for i in 1..4 { if s.players[i].life != Life.Off && addr[i].key == reply.key { who = i; } }
+                if who < 0 && !is_leave {
+                    for i in 1..4 { if who < 0 && s.players[i].life == Life.Off { who = i; } }
                     if who >= 0 {
-                        addr[who] = m.reply;
-                        s.players[who].on = 1;
+                        addr[who] = reply;
+                        s.players[who].life = Life.Alive;
                         s.players[who].name.resize(0);
                         s.players[who].kind = default_kind(who);
                         s.players[who].wins = 0;
@@ -2531,25 +2630,30 @@ fn main() {
                     }
                 }
                 if who < 0 { continue; }
-                if m.leave {
-                    s.players[who].on = 0;
-                    s.players[who].alive = 0;
-                    upeer[who] = -1;
-                    uage[who] = 999;
-                    uok[who] = false;
-                    inp_max[who] = -1;
-                } else if m.is_profile {
-                    s.players[who].name = m.name;
-                    s.players[who].kind = m.kind;
-                } else {
-                    if inp_max[who] < 0 { ack[who] = (m.seq - 1) & 65535; inp_max[who] = m.seq; }
-                    let df = (m.seq - ack[who]) & 65535;
-                    if df > 0 && df < 32 {
-                        let sl = who * 32 + (m.seq & 31);
-                        inp_bits[sl] = m.bits;
-                        inp_seq[sl] = m.seq;
-                    }
-                    if ((m.seq - inp_max[who]) & 65535) < 32768 { inp_max[who] = m.seq; }
+                match m {
+                    Leave lv => {
+                        s.players[who].life = Life.Off;
+                        upeer[who] = -1;
+                        uage[who] = 999;
+                        uok[who] = false;
+                        inp_max[who] = -1;
+                    },
+                    Profile pr => {
+                        s.players[who].name = pr.name;
+                        s.players[who].kind = pr.kind;
+                    },
+                    Input inp => {
+                        if uage[who] >= 30 {   // TCP carries input when UDP is not active
+                            if inp_max[who] < 0 { ack[who] = (inp.seq - 1) & 65535; inp_max[who] = inp.seq; }
+                            let df = (inp.seq - ack[who]) & 65535;
+                            if df > 0 && df < 32 {
+                                let sl = who * 32 + (inp.seq & 31);
+                                inp_bits[sl] = inp.bits;
+                                inp_seq[sl] = inp.seq;
+                            }
+                            if ((inp.seq - inp_max[who]) & 65535) < 32768 { inp_max[who] = inp.seq; }
+                        }
+                    },
                 }
             }
             loop {          // datagrams: 'C', slot, rx_ok, seq lo, seq hi, count, bits[0..count-1]
@@ -2558,7 +2662,7 @@ fn main() {
                 if got < 0 { break; }
                 if got >= 7 && rbuf[0] == 67 {
                     let who = rbuf[1] as i64;
-                    guard who >= 1 && who < 4 && s.players[who].on != 0 else { continue; }
+                    guard who >= 1 && who < 4 && s.players[who].life != Life.Off else { continue; }
                     let sq = (rbuf[3] as i64) | ((rbuf[4] as i64) << 8);
                     let cnt = min(8, min(rbuf[5] as i64, got - 6));
                     n_udp += 1;
@@ -2578,7 +2682,7 @@ fn main() {
                     if ((sq - inp_max[who]) & 65535) < 32768 { inp_max[who] = sq; }
                 } else if got >= 5 && rbuf[0] == 66 {
                     let who = rbuf[1] as i64;
-                    guard who >= 1 && who < 4 && s.players[who].on != 0 else { continue; }
+                    guard who >= 1 && who < 4 && s.players[who].life != Life.Off else { continue; }
                     let sq = (rbuf[3] as i64) | ((rbuf[4] as i64) << 8);
                     n_udp += 1;
                     upeer[who] = from;
@@ -2597,13 +2701,13 @@ fn main() {
                 acc -= 1.0 / 60.0;
                 if s.over > 0 {
                     for i in 1..4 {
-                        if s.players[i].on != 0 && inp_max[i] >= 0 { ack[i] = inp_max[i]; }
+                        if s.players[i].life != Life.Off && inp_max[i] >= 0 { ack[i] = inp_max[i]; }
                     }
                     tick(s, r, n);
                 } else {
                     // Consume each client's inputs in exact seq order so ack always matches simulated movement.
                     for i in 1..4 {
-                        guard s.players[i].on != 0 else { continue; }
+                        guard s.players[i].life != Life.Off else { continue; }
                         if inp_max[i] < 0 { s.players[i].bits = 0; continue; }
                         var pend = (inp_max[i] - ack[i]) & 65535;
                         if pend >= 32768 { pend = 0; }
@@ -2615,8 +2719,8 @@ fn main() {
                             let b = if inp_seq[sl] == nsq { inp_bits[sl] } else { s.players[i].bits };
                             s.players[i].bits = b;
                             ack[i] = nsq;
-                            if s.players[i].alive != 0 { step_player(s, i); }
-                            else if s.players[i].dead_mode != DEAD_NONE { step_dead(s, i); }
+                            if s.players[i].life == Life.Alive { step_player(s, i); }
+                            else if is_dead(s.players[i].life) { step_dead(s, i); }
                             extra -= 1;
                             pend -= 1;
                         }
@@ -2636,7 +2740,7 @@ fn main() {
                 n += 1;
                 s.tick = n;
                 for i in 1..4 {
-                    guard s.players[i].on != 0 else { continue; }
+                    guard s.players[i].life != Life.Off else { continue; }
                     var c = s;
                     c.you = i as u8;
                     c.ack = ack[i];
@@ -2651,8 +2755,7 @@ fn main() {
                     }
                     if !bidir_udp || n % 30 == 0 {          // TCP carries 60 Hz until both directions of UDP are confirmed
                         if http::mail_send_value(addr[i], 0, c) == http::STALE {
-                            s.players[i].on = 0;
-                            s.players[i].alive = 0;
+                            s.players[i].life = Life.Off;
                             upeer[i] = -1;
                             uage[i] = 999;
                             uok[i] = false;
@@ -2685,7 +2788,7 @@ fn main() {
         if s.map != last_map {
             last_map = s.map;
             if !own {
-                track = if s.map == MAP_FOREST { 0 } else if s.map == MAP_MOUNTAINS { 1 } else if s.map == MAP_DESERT { 2 } else { 5 };
+                track = map_track(s.map);
                 audio::stop(tune);
                 tune = audio::play(songs[track], if muted { 0.0 } else { mvol }, 0.0, 1.0, true);
             }
@@ -2716,10 +2819,10 @@ fn main() {
                 ui::label(menu, "Map (changes music & theme):", ui::TEXT_LEFT);
                 ui::layout_row_dynamic(menu, 34.0, 4);
                 let prev_map = s.map;
-                if ui::option_label(menu, "Island", s.map == MAP_ISLAND) { s.map = MAP_ISLAND; }
-                if ui::option_label(menu, "Forest", s.map == MAP_FOREST) { s.map = MAP_FOREST; }
-                if ui::option_label(menu, "Mountains", s.map == MAP_MOUNTAINS) { s.map = MAP_MOUNTAINS; }
-                if ui::option_label(menu, "Desert", s.map == MAP_DESERT) { s.map = MAP_DESERT; }
+                if ui::option_label(menu, "Island", s.map == Map.Island) { s.map = Map.Island; }
+                if ui::option_label(menu, "Forest", s.map == Map.Forest) { s.map = Map.Forest; }
+                if ui::option_label(menu, "Mountains", s.map == Map.Mountains) { s.map = Map.Mountains; }
+                if ui::option_label(menu, "Desert", s.map == Map.Desert) { s.map = Map.Desert; }
                 if s.map != prev_map { reset_round(s, r); }
                 ui::layout_row_dynamic(menu, 28.0, 1);
                 var dlbl: u8[>..] = [];
@@ -2807,14 +2910,14 @@ fn main() {
                 ui::label(menu, "Pick your Farm Character:", ui::TEXT_LEFT);
                 let prev_kind = my_kind;
                 ui::layout_row_dynamic(menu, 36.0, 2);
-                if ui::option_label(menu, "Goose (Eggs)", my_kind == CHAR_GOOSE) { my_kind = CHAR_GOOSE; }
-                if ui::option_label(menu, "Squirrel (Acorns)", my_kind == CHAR_SQUIRREL) { my_kind = CHAR_SQUIRREL; }
+                if ui::option_label(menu, "Goose (Eggs)", my_kind == Character.Goose) { my_kind = Character.Goose; }
+                if ui::option_label(menu, "Squirrel (Acorns)", my_kind == Character.Squirrel) { my_kind = Character.Squirrel; }
                 ui::layout_row_dynamic(menu, 36.0, 2);
-                if ui::option_label(menu, "Baby (Diapers)", my_kind == CHAR_BABY) { my_kind = CHAR_BABY; }
-                if ui::option_label(menu, "Cow (Patties)", my_kind == CHAR_COW) { my_kind = CHAR_COW; }
+                if ui::option_label(menu, "Baby (Diapers)", my_kind == Character.Baby) { my_kind = Character.Baby; }
+                if ui::option_label(menu, "Cow (Patties)", my_kind == Character.Cow) { my_kind = Character.Cow; }
                 ui::layout_row_dynamic(menu, 36.0, 2);
-                if ui::option_label(menu, "Pig (Bacon)", my_kind == CHAR_PIG) { my_kind = CHAR_PIG; }
-                if ui::option_label(menu, "Farmer (Hay Bales)", my_kind == CHAR_FARMER) { my_kind = CHAR_FARMER; }
+                if ui::option_label(menu, "Pig (Bacon)", my_kind == Character.Pig) { my_kind = Character.Pig; }
+                if ui::option_label(menu, "Farmer (Hay Bales)", my_kind == Character.Farmer) { my_kind = Character.Farmer; }
                 let changed = my_kind != prev_kind;
                 ui::layout_row_dynamic(menu, 42.0, 1);
                 let done = ui::button_label(menu, "Play!") || (ed & ui::EDIT_COMMITTED) != 0;
@@ -2845,7 +2948,7 @@ fn main() {
         }
         frame += 1;
     }
-    for i in 4 { if s.players[i].on != 0 { print("player ", i, " at ", s.players[i].x / TILE, ",", s.players[i].y / TILE, " alive ", s.players[i].alive, " wins ", s.players[i].wins, " streak ", s.players[i].streak); } }
+    for i in 4 { if s.players[i].life != Life.Off { print("player ", i, " at ", s.players[i].x / TILE, ",", s.players[i].y / TILE, " alive ", if s.players[i].life == Life.Alive { 1 } else { 0 }, " wins ", s.players[i].wins, " streak ", s.players[i].streak); } }
     if mode != "solo" { print("datagrams ", n_udp, ", snapshots applied ", n_applied); }
     ui::destroy(hud);
     ui::destroy(big);
