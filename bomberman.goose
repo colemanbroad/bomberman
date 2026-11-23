@@ -162,15 +162,15 @@ fn pick_power(mask: u16, r: rng&) -> u8 {
 
 let ROBOTO: const u8[:] = embed_file("Roboto-Regular.ttf");
 struct Player { x: i64, y: i64, life: Life, portal_cd: u8, bombs: u8, range: u8, speed: u8, slow: u8, wins: u8, streak: u8, bits: u8, held: u8, mine_held: u8, placed: u8, ghost: u16, napalm: u16, drunk: u16, kick: u8, unkick: u8, mines: u8, missiles: u8, kind: Character, name: u8[..12] }
-// dir: None when still, otherwise slides; m: ticks since its last step; flags: bit 0 = unkickable, bit 1 = warped.
-struct Bomb { x: u8, y: u8, t: u8, range: u8, owner: u8, dir: Dir, m: u8, flags: u8 }
+// dir: None when still, otherwise slides; m: ticks since its last step; flags: bit 0 = unkickable, bit 1 = warped; fire_lvl: 1..15 flame linger.
+struct Bomb { x: u8, y: u8, t: u16, range: u8, owner: u8, dir: Dir, m: u8, flags: u8, fire_lvl: u8 }
 // Proximity mine: arms down to 0, then explodes when stepped on or blasted.
 struct Mine { x: u8, y: u8, owner: u8, arm: u8 }
 // Player-steered heat-seeker missile: while active, the owner stands still wearing a headset.
 struct Missile { x: i32, y: i32, active: u8, dir: Dir, portal_cd: u8, t: u16 }
 // A sheep wanders at random and blocks the way like a movable block. dir: None when grazing.
 struct Sheep { x: i64, y: i64, alive: u8, dir: Dir, t: u8, portal_cd: u8 }
-struct State { grid: u8[195], players: Player[4], bombs: Bomb[..16], mines: Mine[..8], missiles: Missile[4], sheep: Sheep[2], drops: u8, regrow: u8, map: Map, portals_on: u8, portals: u8[4], power_mask: u16, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
+struct State { grid: u8[195], players: Player[4], bombs: Bomb[..16], mines: Mine[..8], missiles: Missile[4], sheep: Sheep[2], drops: u8, regrow: u8, map: Map, portals_on: u8, portals: u8[4], power_mask: u16, fuse_ticks: u16, fuse_rand: u8, fire_ticks: u8, fire_rand: u8, fire_range: u8, range_rand: u8, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
 
 // UDP (udp.c): inputs and snapshots fly as datagrams when a client joins with `udp`; the WebSocket stays up for
 // joining, leaving and a slow heartbeat. Each snapshot carries its tick, so stale or reordered ones are dropped.
@@ -327,7 +327,7 @@ fn reset_round(s: State&, r: rng&) {
         s.players[i].life = Life.Alive;
         s.players[i].portal_cd = 0;
         s.players[i].bombs = 1;
-        s.players[i].range = 2;
+        s.players[i].range = max(1, s.fire_range as i64) as u8;
         s.players[i].speed = 0;
         s.players[i].slow = 0;
         s.players[i].placed = 0;
@@ -363,15 +363,16 @@ fn reset_round(s: State&, r: rng&) {
     s.dance_who = 255;
 }
 
-fn flame(s: State&, i: i64) {
+fn flame(s: State&, i: i64, lvl: i64) {
     let g = s.grid[i];
-    s.grid[i] = if g == 6 { 2 } else if g == 7 || (g >= 48 && g < 64) { 63 } else if g == 2 || (g >= 32 && g < 48) { 47 } else { 31 };
+    let lv = max(1, min(15, lvl)) as u8;
+    s.grid[i] = if g == 6 { 2 } else if g == 7 || (g >= 48 && g < 64) { 48 + lv } else if g == 2 || (g >= 32 && g < 48) { 32 + lv } else { 16 + lv };
 }
 
-// Explosion at tile bx by with arm length rng: blocks stop an arm, other bombs are set off.
-fn explode_at(s: State&, bx: i64, by: i64, rng: i64) {
+// Explosion at tile bx by with arm length rng and flame linger level (1..15): blocks stop an arm, other bombs are set off.
+fn explode_at(s: State&, bx: i64, by: i64, rng: i64, fire_lvl: i64) {
     if bx <= 0 || bx >= W - 1 || by <= 0 || by >= H - 1 { return; }
-    flame(s, by * W + bx);
+    flame(s, by * W + bx, fire_lvl);
     for d in 4 {
         let dx = if d == 0 { 1 } else if d == 1 { -1 } else { 0 };
         let dy = if d == 2 { 1 } else if d == 3 { -1 } else { 0 };
@@ -381,7 +382,7 @@ fn explode_at(s: State&, bx: i64, by: i64, rng: i64) {
             if tx < 0 || tx >= W || ty < 0 || ty >= H { break; }
             let g = s.grid[ty * W + tx];
             if g == 1 { break; }
-            flame(s, ty * W + tx);
+            flame(s, ty * W + tx, fire_lvl);
             if g == 2 || g == 6 || g == 7 { break; }
             let o = bomb_at(s, tx, ty);
             if o >= 0 { s.bombs[o].t = 0; break; }
@@ -389,7 +390,7 @@ fn explode_at(s: State&, bx: i64, by: i64, rng: i64) {
     }
 }
 
-fn explode(s: State&, b: Bomb) { explode_at(s, b.x as i64, b.y as i64, b.range as i64); }
+fn explode(s: State&, b: Bomb) { explode_at(s, b.x as i64, b.y as i64, b.range as i64, b.fire_lvl as i64); }
 
 // Index of a bomb that player i's box would run into at x y (one it is not already standing on), or -1.
 fn bomb_ahead(s: State&, i: i64, x: i64, y: i64) -> i64 {
@@ -555,7 +556,23 @@ fn step_player(s: State&, i: i64) {
                 by = pdst.y;
                 fl |= BOMB_WARPED;
             }
-            s.bombs.push(Bomb { bx as u8, by as u8, FUSE, p.range, i as u8, Dir.None, 0, fl });
+            let h0 = ((s.tick * 1103515245 + i * 2654435761 + bx * 37 + by * 91) >> 4) & 65535;
+            let h1 = ((h0 * 48271 + 12345) >> 3) & 65535;
+            let h2 = ((h1 * 48271 + 54321) >> 3) & 65535;
+            let base_fuse = max(30, if s.fuse_ticks > 0 { s.fuse_ticks as i64 } else { FUSE });
+            let bt = if s.fuse_rand != 0 {
+                let lo = max(20, base_fuse / 2);
+                let hi = min(360, base_fuse * 3 / 2);
+                lo + (h0 % max(1, hi - lo + 1))
+            } else { base_fuse };
+            let base_rng = max(1, p.range as i64);
+            let br = if s.range_rand != 0 {
+                let lo = max(1, base_rng / 2);
+                let hi = min(12, base_rng * 2);
+                lo + (h1 % max(1, hi - lo + 1))
+            } else { base_rng };
+            let flvl = if s.fire_rand != 0 { 4 + (h2 % 12) } else { 15 };
+            s.bombs.push(Bomb { bx as u8, by as u8, bt as u16, br as u8, i as u8, Dir.None, 0, fl, flvl as u8 });
             s.players[i].placed += 1;
         }
     }
@@ -710,7 +727,7 @@ fn tick(s: State&, r: rng&, n: i64) {
     for i in 4 {
         guard s.missiles[i].active != 0 else { continue; }
         if s.players[i].life != Life.Alive {
-            explode_at(s, s.missiles[i].x / TILE, s.missiles[i].y / TILE, max(3, s.players[i].range as i64));
+            explode_at(s, s.missiles[i].x / TILE, s.missiles[i].y / TILE, max(3, s.players[i].range as i64), 15);
             s.missiles[i].active = 0;
             continue;
         }
@@ -754,7 +771,7 @@ fn tick(s: State&, r: rng&, n: i64) {
             }
         }
         if boom {
-            explode_at(s, s.missiles[i].x / TILE, s.missiles[i].y / TILE, max(3, s.players[i].range as i64));
+            explode_at(s, s.missiles[i].x / TILE, s.missiles[i].y / TILE, max(3, s.players[i].range as i64), 15);
             s.missiles[i].active = 0;
         }
     }
@@ -776,12 +793,13 @@ fn tick(s: State&, r: rng&, n: i64) {
         }
         if trig {
             remove_at(s.mines, mi);
-            explode_at(s, m.x as i64, m.y as i64, max(2, s.players[m.owner].range as i64));
+            explode_at(s, m.x as i64, m.y as i64, max(2, s.players[m.owner].range as i64), 15);
         } else {
             mi += 1;
         }
     }
-    if n % 2 == 0 {
+    let fdiv = max(1, (if s.fire_ticks > 0 { s.fire_ticks as i64 } else { 16 }) / 8);
+    if n % fdiv == 0 {
         for i in W * H {
             let g = s.grid[i];
             if g < 16 || g >= 64 { continue; }
@@ -2638,6 +2656,12 @@ fn main() {
     s.map = init_map;
     s.portals_on = 1;
     s.power_mask = PWR_ALL;
+    s.fuse_ticks = FUSE as u16;
+    s.fuse_rand = 0;
+    s.fire_ticks = 16;
+    s.fire_rand = 0;
+    s.fire_range = 2;
+    s.range_rand = 0;
     reset_round(s, r);
     var start_host = mode == GameMode.Host;
     var start_join = mode == GameMode.Join;
@@ -3272,6 +3296,45 @@ fn main() {
                 ui::label(menu, rlbl, ui::TEXT_LEFT);
                 ui::layout_row_dynamic(menu, 26.0, 1);
                 s.regrow = ui::slide_int(menu, 0, s.regrow as i64, 100, 5) as u8;
+                // Bomb & Fire Tuning: sliders + per-bomb randomize toggles
+                let trat: f32[2] = [0.70, 0.30];
+                ui::layout_row(menu, ui::DYNAMIC, 28.0, trat);
+                var flbl: u8[>..] = [];
+                let fs_tenths = (s.fuse_ticks as i64) * 10 / 60;
+                format(flbl, "Bomb Fuse Wait: ", fs_tenths / 10, ".", fs_tenths % 10, "s");
+                ui::label(menu, flbl, ui::TEXT_LEFT);
+                var fr_on = s.fuse_rand != 0;
+                if ui::checkbox_label(menu, "Randomize", fr_on) { s.fuse_rand = if fr_on { 1 } else { 0 }; }
+                ui::layout_row_dynamic(menu, 26.0, 1);
+                s.fuse_ticks = ui::slide_int(menu, 30, s.fuse_ticks as i64, 300, 15) as u16;
+
+                ui::layout_row(menu, ui::DYNAMIC, 28.0, trat);
+                var fdlbl: u8[>..] = [];
+                let fd_tenths = max(1, (s.fire_ticks as i64) / 8) * 160 / 60;
+                format(fdlbl, "Fire Duration: ", fd_tenths / 10, ".", fd_tenths % 10, "s");
+                ui::label(menu, fdlbl, ui::TEXT_LEFT);
+                var fdr_on = s.fire_rand != 0;
+                if ui::checkbox_label(menu, "Randomize", fdr_on) { s.fire_rand = if fdr_on { 1 } else { 0 }; }
+                ui::layout_row_dynamic(menu, 26.0, 1);
+                s.fire_ticks = ui::slide_int(menu, 8, s.fire_ticks as i64, 48, 8) as u8;
+
+                ui::layout_row(menu, ui::DYNAMIC, 28.0, trat);
+                var erlbl: u8[>..] = [];
+                format(erlbl, "Base Fire Extent: ", s.fire_range, " tiles");
+                ui::label(menu, erlbl, ui::TEXT_LEFT);
+                var rr_on = s.range_rand != 0;
+                if ui::checkbox_label(menu, "Randomize", rr_on) { s.range_rand = if rr_on { 1 } else { 0 }; }
+                ui::layout_row_dynamic(menu, 26.0, 1);
+                let prev_rng = s.fire_range;
+                s.fire_range = ui::slide_int(menu, 1, s.fire_range as i64, 6, 1) as u8;
+                if s.fire_range != prev_rng {
+                    for i in 4 {
+                        if s.players[i].life != Life.Off {
+                            let adj = (s.players[i].range as i64) + (s.fire_range as i64) - (prev_rng as i64);
+                            s.players[i].range = max(1, min(12, adj)) as u8;
+                        }
+                    }
+                }
                 let prat: f32[4] = [0.40, 0.18, 0.24, 0.18];
                 ui::layout_row(menu, ui::DYNAMIC, 34.0, prat);
                 ui::label(menu, "Enabled Power-Ups:", ui::TEXT_LEFT);
