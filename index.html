@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Goose Bomberman: a free four-player Bomberman you host yourself, for Mac and Windows.">
+<meta name="description" content="Goose Bomberman: fast four-player Bomberman you host yourself—four game modes, 15 power-ups, flaming sheep, day/night cycles, and kill replays for Mac and Windows.">
 <style>html,body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style>
 <title>Goose Bomberman</title>
 <link rel="icon" type="image/png" href="favicon.png">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lilita+One&family=Roboto:wght@400;500;700&display=swap">
 <style>
-/* A dark bunker-and-bricks page that borrows the game's own palette: slate floor, brick orange, flame yellow. */
+/* A dark bunker-and-bricks page borrowing the game's palette: slate floor, brick orange, flame yellow. */
 :root {
   --bg: #0e111b; --panel: #171c2b; --panel2: #1f2640; --line: #2c3556;
   --fg: #eef0f7; --muted: #a0a9c4; --brick: #e07040; --flame: #ffb02e;
@@ -26,12 +26,12 @@ a { color: var(--flame); }
 h1, h2, h3 { font-family: var(--display); font-weight: 400; letter-spacing: .01em; text-wrap: balance; margin: 0; }
 h2 { font-size: clamp(28px, 4vw, 40px); line-height: 1.1; margin-bottom: 14px; }
 h3 { font-size: 22px; margin-bottom: 6px; }
-p { margin: 0 0 12px; max-width: 62ch; }
+p { margin: 0 0 12px; max-width: 64ch; }
 .muted { color: var(--muted); }
 
 .bar { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding-block: 18px; }
 .brand { font: 400 22px var(--display); display: flex; align-items: center; gap: 10px; }
-.brand i { width: 14px; height: 14px; border-radius: 50%; background: var(--red); box-shadow: 18px 0 0 var(--blue), 36px 0 0 var(--green); margin-right: 36px; }
+.brand img { width: 32px; height: 32px; border-radius: 7px; }
 .bar nav { display: flex; gap: 20px; flex-wrap: wrap; font-size: 15px; }
 .bar nav a { color: var(--muted); text-decoration: none; }
 .bar nav a:hover, .bar nav a:focus-visible { color: var(--fg); }
@@ -62,7 +62,7 @@ pre code { background: none; border: 0; padding: 0; font-size: inherit; }
 .copy:hover, .copy:focus-visible { color: var(--fg); border-color: var(--flame); outline: none; }
 .note { font-size: 14px; color: var(--muted); margin-top: 12px; }
 
-.ups { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 16px; margin-top: 22px; }
+.ups { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-top: 22px; }
 .up { display: flex; gap: 14px; align-items: flex-start; }
 .up svg { flex: none; width: 56px; height: 56px; }
 .up b { display: block; font-weight: 700; }
@@ -88,151 +88,190 @@ footer p { max-width: 80ch; }
 
 <div class="wrap">
   <header class="bar">
-    <div class="brand"><i></i>Goose Bomberman</div>
-    <nav><a href="#download">Download</a><a href="#play">Play with friends</a><a href="#extras">What's in it</a><a href="https://github.com/colemanbroad/bomberman">Source</a></nav>
+    <div class="brand"><img src="favicon.png" alt="">Goose Bomberman</div>
+    <nav><a href="#download">Install</a><a href="#play">Play</a><a href="#modes">Modes</a><a href="#extras">Arsenal</a><a href="#controls">Controls</a><a href="https://github.com/colemanbroad/bomberman">Source</a></nav>
   </header>
 
   <div class="hero">
     <div>
-      <h1>Blow up the bricks. <em>Beat your friends.</em></h1>
-      <p class="lede">A four-player Bomberman you host yourself. Pick a farm character, enter your name, fight across four themed maps with custom music, and keep playing even after you're eliminated. No accounts, no install.</p>
+      <h1>Blow up the bricks. <em>Outlast your friends.</em></h1>
+      <p class="lede">Fast, self-hosted Bomberman for up to four players on Mac and Windows. Battle across four biomes and four game modes with 15 power-ups, flaming sheep, pitch-black nights, and instant kill replays—no accounts, no servers to rent, and automatic updates.</p>
       <div class="cta">
-        <a class="btn" id="dl-mac" href="https://github.com/colemanbroad/bomberman/releases/latest/download/bomberman-mac-arm64.zip">Download for Mac<small>Apple Silicon · 3.8 MB</small></a>
-        <a class="btn" id="dl-win" href="https://github.com/colemanbroad/bomberman/releases/latest/download/bomberman-windows.zip">Download for Windows<small>64-bit · 4.0 MB</small></a>
+        <a class="btn" id="dl-mac" href="https://github.com/colemanbroad/bomberman/releases/latest/download/bomberman-mac-arm64.zip">Download for Mac<small>Apple Silicon · 4.6 MB</small></a>
+        <a class="btn" id="dl-win" href="https://github.com/colemanbroad/bomberman/releases/latest/download/bomberman-windows.zip">Download for Windows<small>64-bit · 4.4 MB</small></a>
       </div>
-      <p class="note" id="osnote">Free and open source. Pick the one for your computer.</p>
+      <p class="note" id="osnote">Free and open source. Or use the one-line auto-updating installer below.</p>
     </div>
     <figure class="shot">
-      <img src="hero.jpg" alt="The game board: a red blob, a white goose and a green blob among brick walls, with two fluffy sheep wandering the middle" width="1400" height="1050">
-      <figcaption>A real match: three players and two wandering sheep. Flames, gift crates and steel crates are on the board.</figcaption>
+      <img src="hero.jpg" alt="Goose Bomberman arena with farm characters, brick walls, wandering sheep, flames, and gift crates" width="1400" height="1050">
+      <figcaption>Four players, wandering sheep, portals, hidden brush, and custom host rules—running smoothly at 60 Hz.</figcaption>
     </figure>
   </div>
 
   <section id="download">
-    <h2>Quick install (recommended)</h2>
-    <p class="muted">Paste one line to download, skip OS quarantine warnings, create a clickable app icon, and auto-update whenever a new version drops.</p>
+    <h2>Install in one line</h2>
+    <p class="muted">The easiest way to play. Each command grabs the latest release, avoids OS quarantine warnings, creates a clickable app icon, and auto-updates every time you launch.</p>
     <div class="two">
       <div class="card">
         <h3>Mac</h3>
         <p class="muted">Apple Silicon (M1 or newer). Open <b>Terminal</b> and paste:</p>
         <pre><code>curl -fsSL https://colemanbroad.github.io/bomberman/play.sh | sh</code><button class="copy" type="button">Copy</button></pre>
-        <p class="note">Installs <code>~/Applications/Bomberman.app</code> and launches right into the start menu. Next time, just double-click <b>Bomberman</b> in Applications (or Spotlight) — it auto-updates automatically.</p>
+        <p class="note">Adds <b>Bomberman</b> to <code>~/Applications</code> (and Spotlight) and opens straight into the start menu. Next time, just double-click the icon—updates happen automatically.</p>
       </div>
       <div class="card">
         <h3>Windows</h3>
         <p class="muted">Windows 10 or 11 (64-bit). Open <b>PowerShell</b> and paste:</p>
         <pre><code>irm https://colemanbroad.github.io/bomberman/play.ps1 | iex</code><button class="copy" type="button">Copy</button></pre>
-        <p class="note">Creates a <b>Bomberman</b> Desktop shortcut and launches right into the start menu. Double-click the Desktop icon anytime to auto-update and play. Allow it through Windows Firewall when asked.</p>
+        <p class="note">Drops a <b>Bomberman</b> icon on your Desktop and launches the start menu. Double-click it anytime to stay up to date. Allow Windows Firewall access when prompted.</p>
       </div>
     </div>
   </section>
 
   <section id="play">
-    <h2>Play with friends</h2>
-    <p class="muted">Launch the app to pick <b>Play Solo</b>, <b>Join Game</b>, or <b>Host Game</b> right from the start menu—no terminal commands needed.</p>
+    <h2>Host or join in seconds</h2>
+    <p class="muted">No terminal commands required. Launch the app to pick your name, farm animal, and whether to play <b>Solo</b>, <b>Host</b>, or <b>Join</b>—your preferences and last server are saved automatically.</p>
     <div class="two">
       <div class="card">
-        <h3>The host</h3>
-        <p>Choose your networking mode in the Start menu (or switch anytime inside <b>Host Settings</b>):</p>
+        <h3>Hosting a match</h3>
+        <p>Pick how friends connect in the Start menu, or switch live anytime inside <b>Host Settings</b>:</p>
         <ol>
-          <li><b>LAN / Tailscale</b> — instant play on the same Wi-Fi or over Tailscale.</li>
-          <li><b>UPnP Port-Forward</b> — automatically opens your router's port (and closes it on exit) and shows your public IP.</li>
-          <li><b>playit.gg</b> — works behind any firewall or ISP CGNAT; point a free TCP+UDP tunnel to port <code>8080</code> and share the address.</li>
+          <li><b>LAN / Tailscale</b> — instant play on the same Wi-Fi or over a Tailscale mesh.</li>
+          <li><b>UPnP Port-Forward</b> — automatically opens your router's port (closes it cleanly on exit) and displays your public IP.</li>
+          <li><b>playit.gg</b> — punches through any router or ISP CGNAT; point a free TCP+UDP tunnel to port <code>8080</code> and share your address.</li>
         </ol>
         <pre><code>./bomberman-portable host --upnp</code><button class="copy" type="button">Copy</button></pre>
-        <p class="note">CLI options still work too: <code>host [--port N] [--upnp | --lan | --playit ADDR]</code>.</p>
+        <p class="note">Power users can still launch directly via CLI: <code>host [--port N] [--upnp | --lan | --playit ADDR]</code>.</p>
       </div>
       <div class="card">
-        <h3>Everyone else</h3>
-        <p>Type the host's IP or <code>host:port</code> (like <code>192.168.4.46</code> or <code>foo.gl.at.ply.gg:24680</code>) in the Start menu and click <b>Join Game</b>. Your last server and profile are remembered automatically.</p>
+        <h3>Joining a friend</h3>
+        <p>Paste the host's IP or <code>host:port</code> (like <code>192.168.4.46</code> or <code>foo.gl.at.ply.gg:24680</code>) into the Start menu and hit <b>Join Game</b>.</p>
         <pre><code>./bomberman-portable join 192.168.4.46</code><button class="copy" type="button">Copy</button></pre>
-        <p class="note">The top right reads <b>CLIENT P2 UDP</b> once low-latency UDP connects (with automatic WebSocket fallback if UDP is blocked; check "Force TCP only" or add <code>tcp</code> if needed).</p>
+        <p class="note">Client-side prediction keeps movement snappy over Wi-Fi and internet links. Low-latency 60 Hz UDP activates automatically (showing <b>UDP</b> in the corner), with seamless WebSocket fallback if UDP is blocked.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="modes">
+    <h2>Four game modes</h2>
+    <p class="muted">Switch modes between rounds right inside <b>Host Settings</b>.</p>
+    <div class="cast">
+      <div class="card">
+        <h3>Free-for-All</h3>
+        <p>Classic last-fighter-standing mayhem. Build win streaks and trigger a full-screen spotlight victory dance every 5 wins.</p>
+      </div>
+      <div class="card">
+        <h3>2v2 Teams</h3>
+        <p>Squad up with team-colored rings and shared victories. Friendly fire is on by default for classic chaos—or toggle it off in Host Settings.</p>
+      </div>
+      <div class="card">
+        <h3>Prey</h3>
+        <p>One fast, invisible runner tries to survive 60 seconds while everyone else hunts them down with traps and crossfire.</p>
+      </div>
+      <div class="card">
+        <h3>Predator</h3>
+        <p>One supercharged hunter stalks a squad of invisible runners who shimmer faintly only while moving—steal power-ups before the Predator does.</p>
       </div>
     </div>
   </section>
 
   <section id="extras">
-    <h2>What's in it</h2>
-    <p class="muted">Classic rules: drop bombs, burn bricks, pick up power-ups, be the last one standing. Then some extras.</p>
+    <h2>Arsenal &amp; arena chaos</h2>
+    <p class="muted">Fifteen power-ups and weapons—every single one toggleable by the host, alongside fuse, fire duration, and blast range sliders.</p>
     <div class="ups">
       <div class="up">
         <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="6" y="6" width="52" height="52" rx="12" fill="#c83c28" stroke="#fff" stroke-width="2.5"/><path d="M32 14 44 44H20Z" fill="#ffd23c"/><ellipse cx="32" cy="42" rx="12" ry="9" fill="#ffd23c"/><path d="M32 28 38 46H26Z" fill="#ff7828"/></svg>
-        <div><b>Range</b><span>Flames reach one tile further.</span></div>
+        <div><b>Range</b><span>Extends your blast radius by one tile.</span></div>
       </div>
       <div class="up">
         <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="6" y="6" width="52" height="52" rx="12" fill="#464654" stroke="#fff" stroke-width="2.5"/><circle cx="31" cy="36" r="14" fill="#0f0f14"/><circle cx="26" cy="31" r="3.5" fill="#fff"/><path d="M40 28 46 19" stroke="#e6c88c" stroke-width="3" stroke-linecap="round"/><circle cx="47" cy="17" r="4" fill="#ffd23c"/></svg>
-        <div><b>Extra bomb</b><span>Carry one more bomb at a time.</span></div>
+        <div><b>Extra Bomb</b><span>Drop one more bomb at the same time.</span></div>
       </div>
       <div class="up">
         <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="6" y="6" width="52" height="52" rx="12" fill="#1e96cd" stroke="#fff" stroke-width="2.5"/><path d="M36 13 22 32H33Z" fill="#ffeb5a"/><path d="M31 29H43L28 52 31 36Z" fill="#ffeb5a"/></svg>
-        <div><b>Speed</b><span>Run faster, up to three times.</span></div>
+        <div><b>Speed Bolt</b><span>Stack up to three tiers of running speed.</span></div>
       </div>
       <div class="up">
         <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="6" y="6" width="52" height="52" rx="12" fill="#7850be" stroke="#fff" stroke-width="2.5"/><path d="M19 48V30a13 13 0 0 1 26 0v18l-4.3-4-4.3 4-4.4-4-4.4 4-4.3-4Z" fill="#f0f0ff"/><circle cx="27" cy="29" r="2.5" fill="#281e46"/><circle cx="37" cy="29" r="2.5" fill="#281e46"/></svg>
-        <div><b>Ghost</b><span>Ten seconds of invisibility. Others only see a faint trail of dust while you move.</span></div>
+        <div><b>Ghost</b><span>Ten seconds of invisibility—only faint footprints of dust give you away.</span></div>
       </div>
       <div class="up">
         <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="6" y="6" width="52" height="52" rx="12" fill="#cd7d28" stroke="#fff" stroke-width="2.5"/><rect x="24" y="15" width="12" height="22" rx="2" fill="#fff"/><rect x="24" y="31" width="22" height="11" rx="5" fill="#fff"/><rect x="20" y="41" width="28" height="4" rx="1" fill="#46281a"/><path d="M13 27 19 29M13 36 19 36" stroke="#ffeb5a" stroke-width="2.5" stroke-linecap="round"/></svg>
-        <div><b>Kick</b><span>Run into a bomb and it slides until something solid stops it.</span></div>
+        <div><b>Kick Boot</b><span>Punt bombs down corridors, through grates, and straight into portals.</span></div>
       </div>
       <div class="up">
         <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="6" y="6" width="52" height="52" rx="12" fill="#d22d4b" stroke="#fff" stroke-width="2.5"/><circle cx="32" cy="32" r="18" fill="none" stroke="rgba(255,255,255,.55)" stroke-width="2"/><path d="M19 45 30 34" stroke="#ffd746" stroke-width="4.5" stroke-linecap="round"/><path d="M47 17 36 37 27 28Z" fill="#fff"/><path d="M47 17 41 27 37 23Z" fill="#ff4632"/></svg>
-        <div><b>Heat-Seeker Missile</b><span>Stand still wearing a headset and steer a guided missile until it explodes.</span></div>
+        <div><b>Heat-Seeker Missile</b><span>Slip on a VR headset and remote-pilot a guided missile around corners.</span></div>
       </div>
       <div class="up">
         <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="6" y="6" width="52" height="52" rx="12" fill="#dc5614" stroke="#fff" stroke-width="2.5"/><circle cx="20" cy="42" r="6" fill="#ffc332"/><path d="M20 27 26 42H14Z" fill="#fff078"/><circle cx="33" cy="36" r="6" fill="#ffc332"/><path d="M33 21 39 36H27Z" fill="#fff078"/><circle cx="46" cy="30" r="6" fill="#ffc332"/><path d="M46 15 52 30H40Z" fill="#fff078"/></svg>
-        <div><b>Napalm</b><span>Leaves a slowly decaying trail of fire behind every tile you walk off.</span></div>
+        <div><b>Napalm</b><span>Leaves a slow-burning ribbon of fire on every tile you step off.</span></div>
       </div>
       <div class="up">
         <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="6" y="6" width="52" height="52" rx="12" fill="#406044" stroke="#fff" stroke-width="2.5"/><ellipse cx="32" cy="34" rx="16" ry="13" fill="#23262a" stroke="#b4bec3" stroke-width="2.5"/><ellipse cx="32" cy="33" rx="5.5" ry="4.5" fill="#ff4137"/></svg>
-        <div><b>Proximity Mines</b><span>Drop hidden mines with <kbd>E</kbd>/<kbd>X</kbd> that arm and blow up when stepped on.</span></div>
+        <div><b>Proximity Mines</b><span>Plant stealth mines with <kbd>E</kbd>/<kbd>X</kbd> that vanish to enemies once armed.</span></div>
       </div>
       <div class="up">
         <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="6" y="6" width="52" height="52" rx="12" fill="#b937a5" stroke="#fff" stroke-width="2.5"/><rect x="20" y="22" width="20" height="26" rx="4" fill="#ffc83c"/><rect x="19" y="17" width="22" height="8" rx="4" fill="#fff"/><rect x="40" y="27" width="8" height="13" rx="3" fill="none" stroke="#fff" stroke-width="3"/><circle cx="17" cy="16" r="3" fill="#ffa0f5"/><circle cx="44" cy="15" r="2.5" fill="#fff078"/></svg>
-        <div><b>Drunk</b><span>Grants every other positive power at once, with a wobbly jitter you have to fight.</span></div>
+        <div><b>Drunk</b><span>Grants every positive upgrade at once—if you can handle the wobbly steering.</span></div>
       </div>
       <div class="up">
         <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="6" y="6" width="52" height="52" rx="12" fill="#602a70" stroke="#fff" stroke-width="2.5"/><circle cx="32" cy="28" r="13" fill="#bef591"/><rect x="24" y="36" width="16" height="11" rx="2" fill="#bef591"/><circle cx="27" cy="27" r="3" fill="#2d1238"/><circle cx="37" cy="27" r="3" fill="#2d1238"/></svg>
-        <div><b>Curse</b><span>A risky trade-off: longer flame range, but you move slower.</span></div>
+        <div><b>Curse</b><span>Massive flame range, at the cost of heavy boots.</span></div>
       </div>
       <div class="up">
         <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="6" y="6" width="52" height="52" rx="12" fill="#344a62" stroke="#fff" stroke-width="2.5"/><circle cx="32" cy="19" r="5" fill="none" stroke="#e1ebf5" stroke-width="3"/><path d="M32 24V48M21 30H43M19 41 32 49 45 41" fill="none" stroke="#e1ebf5" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        <div><b>Unkickable Bombs</b><span>Your bombs gain an iron anchor ring and refuse to slide when kicked.</span></div>
+        <div><b>Unkickable Bombs</b><span>Iron-anchored bombs that refuse to budge when kicked.</span></div>
+      </div>
+      <div class="up">
+        <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="6" y="6" width="52" height="52" rx="12" fill="#9c5e30" stroke="#fff" stroke-width="2.5"/><rect x="16" y="34" width="32" height="15" rx="2" fill="#e17a44" stroke="#ffebc8" stroke-width="2"/><path d="M22 17V34M42 17V34M22 22H42M22 28H42" stroke="#e1ebf5" stroke-width="2.5" stroke-linecap="round"/></svg>
+        <div><b>Builder Kit</b><span>Press <kbd>Q</kbd> to wall off a tile with a brick, or <kbd>Shift</kbd>+<kbd>Q</kbd> for a permanent edge fence.</span></div>
+      </div>
+      <div class="up">
+        <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="6" y="6" width="52" height="52" rx="12" fill="#c69418" stroke="#fff" stroke-width="2.5"/><rect x="14" y="27" width="22" height="10" rx="2" fill="#fff58c"/><path d="M51 32 32 16V48Z" fill="#fff58c"/></svg>
+        <div><b>Directional Bombs</b><span>Focus the entire explosion into one extra-long laser lane in the direction you face.</span></div>
+      </div>
+      <div class="up">
+        <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="6" y="6" width="52" height="52" rx="12" fill="#e1441c" stroke="#fff" stroke-width="2.5"/><rect x="14" y="28" width="16" height="9" rx="2" fill="#d2dce6"/><path d="M29 32 51 16V48Z" fill="#ffd23c"/><path d="M32 32 48 24V40Z" fill="#fffac8"/></svg>
+        <div><b>Flamethrower</b><span>Tap <kbd>F</kbd> to blast an instant 3-tile jet of fire straight ahead.</span></div>
+      </div>
+      <div class="up">
+        <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="6" y="6" width="52" height="52" rx="12" fill="#eb7012" stroke="#fff" stroke-width="2.5"/><path d="M13 40 36 20 42 43Z" fill="#ff821e"/><circle cx="38" cy="29" r="12" fill="#ffe150"/><circle cx="38" cy="29" r="6" fill="#ffffe6"/></svg>
+        <div><b>Fireball Thrower</b><span>Tap <kbd>F</kbd> to launch a fast portal-warping fireball that bursts on impact.</span></div>
       </div>
     </div>
 
     <div class="cast">
       <div class="card">
-        <h3>Six farm characters</h3>
-        <p>Enter your name and pick your fighter in <b>Profile</b>: Goose (eggs), Squirrel (acorns), Baby (diapers), Cow (cow patties), Pig (bacon), or Farmer (hay bales).</p>
+        <h3>Six farm fighters</h3>
+        <p>Pick your look and themed bombs in <b>Profile</b>: Goose (eggs), Squirrel (acorns), Baby (diapers), Cow (cow patties), Pig (bacon), or Farmer (hay bales).</p>
       </div>
       <div class="card">
-        <h3>Four maps &amp; original music</h3>
-        <p>Play on <b>Tropical Island</b>, <b>Forest</b>, <b>Mountains</b>, and <b>Desert</b>—each with its own look, layout, and custom soundtrack. Press <kbd>N</kbd> to cycle tracks or drop in your own <code>music.wav</code>.</p>
+        <h3>Four biomes, textures &amp; music</h3>
+        <p>Fight on <b>Tropical Island</b>, <b>Forest</b>, <b>Mountains</b>, and <b>Desert</b>—each with its own soundtrack (<kbd>N</kbd> cycles tracks, or drop in <code>music.wav</code>). Press <kbd>T</kbd> anytime to toggle detailed GPU textures.</p>
       </div>
       <div class="card">
-        <h3>Win streaks &amp; victory dance</h3>
-        <p>Consecutive wins build your streak. Hit every 5 wins and the camera spotlights you doing a victory dance right in everyone's faces.</p>
+        <h3>Fluffy &amp; flaming sheep</h3>
+        <p>Fluffy sheep trot around corridors like living roadblocks—until a blast sets them on fire! Flaming sheep sprint at double speed and roast anyone they touch.</p>
       </div>
       <div class="card">
-        <h3>Portals</h3>
-        <p>Linked cyan and orange portals warp characters, wandering sheep, kicked or dropped bombs, and guided missiles across the board.</p>
+        <h3>Brush, grates &amp; fences</h3>
+        <p>Hide from enemies inside burnable <b>Forest Brush</b>, punt bombs and fire right through <b>Semi-Permeable Grates</b>, and trap corridors with edge-only <b>Chain-Link Fences</b>.</p>
+      </div>
+      <div class="card">
+        <h3>Day &amp; night cycles</h3>
+        <p>Flip on <b>Day/Night Cycle</b> in Host Settings. When night falls, crickets chirp and blocks and bombs vanish—only glowing eyes and brief explosion flashes light the dark.</p>
+      </div>
+      <div class="card">
+        <h3>Kill replays &amp; session stats</h3>
+        <p>Every round ends with a slow-motion <b>Kill Replay Reel</b>. Open <b>Replays</b> to re-watch or save any kill from the session to disk, and tap <kbd>Tab</kbd> for kills, suicides, and sheep-death stats.</p>
       </div>
       <div class="card">
         <h3>Play on after you die</h3>
-        <p>Eliminated players reincarnate as a controllable <b>Black Sheep</b> to block rivals, or press <kbd>Space</kbd> to become a fast wall-phasing <b>Fog Ghost</b> leaving thick obscuring fog.</p>
+        <p>Eliminated early? Immediately return as a controllable <b>Black Sheep</b> to block rivals, or hit <kbd>Space</kbd> to phase through walls as a fog-leaving <b>Fog Ghost</b>.</p>
       </div>
       <div class="card">
-        <h3>Host's rules</h3>
-        <p>Open <b>Host Settings</b> to choose the map, toggle portals, enable or disable any of the 11 power-ups, tune drop rate, and control how fast blocks regrow when the field gets empty.</p>
-      </div>
-      <div class="card">
-        <h3>Sheep &amp; hold your ground</h3>
-        <p>Wandering sheep block corridors like moving crates. Hold <kbd>Shift</kbd> to freeze in place so rivals and sliding bombs cannot get past you.</p>
-      </div>
-      <div class="card">
-        <h3>Fast and fair</h3>
-        <p>Your character answers the instant you press a key, with host reconciliation. Join over WebSocket or optional low-latency UDP.</p>
+        <h3>Host's sandbox</h3>
+        <p>Tune everything live in <b>Host Settings</b>: mode, map, portals, drop rate, wall regrowth, all 15 power-ups, plus sliders and randomize toggles for bomb fuse, fire duration, and blast extent.</p>
       </div>
     </div>
   </section>
@@ -244,19 +283,22 @@ footer p { max-width: 80ch; }
         <thead><tr><th>Key</th><th>What it does</th></tr></thead>
         <tbody>
           <tr><td><kbd>←</kbd> <kbd>↑</kbd> <kbd>↓</kbd> <kbd>→</kbd> or <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd></td><td>Move (or steer an active Heat-Seeker Missile)</td></tr>
-          <tr><td><kbd>Space</kbd></td><td>Drop a bomb, launch/detonate a missile, or toggle Black Sheep / Fog Ghost when dead</td></tr>
-          <tr><td><kbd>E</kbd> / <kbd>X</kbd> (or <kbd>Shift</kbd>+<kbd>Space</kbd>)</td><td>Place a proximity mine</td></tr>
-          <tr><td><kbd>Shift</kbd></td><td>Hold position: freeze, and block others</td></tr>
-          <tr><td><kbd>M</kbd></td><td>Mute the music</td></tr>
-          <tr><td><kbd>N</kbd></td><td>Cycle music tracks</td></tr>
-          <tr><td><kbd>Esc</kbd></td><td>Close open menus, or quit</td></tr>
+          <tr><td><kbd>Space</kbd></td><td>Drop a bomb, launch/detonate a missile, switch Black Sheep / Fog Ghost when dead, or skip a replay</td></tr>
+          <tr><td><kbd>F</kbd></td><td>Fire active weapon (Fireball Thrower or Flamethrower)</td></tr>
+          <tr><td><kbd>Q</kbd> / <kbd>Shift</kbd>+<kbd>Q</kbd></td><td>Place a destructible brick ahead / place a permanent chain-link boundary fence</td></tr>
+          <tr><td><kbd>E</kbd> / <kbd>X</kbd> (or <kbd>Shift</kbd>+<kbd>Space</kbd>)</td><td>Plant a proximity mine</td></tr>
+          <tr><td><kbd>Shift</kbd></td><td>Hold position: freeze in place and block rivals or kicked bombs</td></tr>
+          <tr><td><kbd>T</kbd></td><td>Toggle Detailed Textured Graphics</td></tr>
+          <tr><td><kbd>Tab</kbd></td><td>Show / hide Session Kill &amp; Suicide Stats</td></tr>
+          <tr><td><kbd>M</kbd> / <kbd>N</kbd></td><td>Mute music / cycle built-in tracks</td></tr>
+          <tr><td><kbd>Esc</kbd></td><td>Close open menus or replays, or quit</td></tr>
         </tbody>
       </table>
     </div>
   </section>
 
   <footer>
-    <p>Written in <a href="https://github.com/aardappel/goose">Goose</a>, a small language that compiles to C, with its Nuklear UI and SDL3 graphics. The source and every release are on <a href="https://github.com/colemanbroad/bomberman">GitHub</a>. The game uses the Roboto font under the Apache 2.0 license.</p>
+    <p>Written in <a href="https://github.com/aardappel/goose">Goose</a>, a small language that compiles to C, using its Nuklear UI and SDL3 graphics. Source code and every release live on <a href="https://github.com/colemanbroad/bomberman">GitHub</a>. Uses the Roboto font under the Apache 2.0 license.</p>
     <p>An unofficial fan project, not affiliated with or endorsed by Konami or Hudson Soft. Bomberman is their trademark.</p>
   </footer>
 </div>
@@ -279,8 +321,8 @@ function select(el) { var r = document.createRange(); r.selectNodeContents(el); 
   var ua = navigator.userAgent || '';
   var mac = /Mac/.test(ua) && !/iPhone|iPad/.test(ua), win = /Windows/.test(ua);
   var note = document.getElementById('osnote');
-  if (mac) { document.getElementById('dl-mac').classList.add('rec'); document.getElementById('dl-win').classList.add('alt'); note.textContent = 'You are on a Mac. This build is for Apple Silicon (M1 or newer).'; }
-  else if (win) { document.getElementById('dl-win').classList.add('rec'); document.getElementById('dl-mac').classList.add('alt'); note.textContent = 'You are on Windows. Unzip it and run bomberman.exe.'; }
+  if (mac) { document.getElementById('dl-mac').classList.add('rec'); document.getElementById('dl-win').classList.add('alt'); note.textContent = 'You are on a Mac (Apple Silicon). For zero Gatekeeper prompts + auto-updates, paste the one-liner below.'; }
+  else if (win) { document.getElementById('dl-win').classList.add('rec'); document.getElementById('dl-mac').classList.add('alt'); note.textContent = 'You are on Windows. For a Desktop icon + auto-updates, paste the PowerShell one-liner below.'; }
 })();
 </script>
 
