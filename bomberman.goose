@@ -35,6 +35,10 @@ let NAPALM = 480;            // napalm trail length in ticks
 let DRUNK = 900;             // drunk jitter length in ticks
 let BOMB_UNKICK: u8 = 1;
 let BOMB_WARPED: u8 = 2;
+let CAUSE_NONE: u8 = 0;
+let CAUSE_BOMB: u8 = 1;
+let CAUSE_SUICIDE: u8 = 2;
+let CAUSE_SHEEP: u8 = 3;
 
 enum Character { Goose, Squirrel, Baby, Cow, Pig, Farmer }
 enum Map { Island, Forest, Mountains, Desert }
@@ -182,7 +186,7 @@ fn pick_power(mask: u32, r: rng&) -> u8 {
 }
 
 let ROBOTO: const u8[:] = embed_file("Roboto-Regular.ttf");
-struct Player { x: i64, y: i64, life: Life, facing: Dir, portal_cd: u8, bombs: u8, range: u8, speed: u8, slow: u8, wins: u8, streak: u8, bits: u16, held: u8, mine_held: u8, build_held: u8, fire_held: u8, placed: u8, ghost: u16, napalm: u16, drunk: u16, kick: u8, unkick: u8, mines: u8, missiles: u8, builds: u8, dir_bombs: u8, flamer: u8, fireballs: u8, kind: Character, name: u8[..12] }
+struct Player { x: i64, y: i64, life: Life, facing: Dir, portal_cd: u8, bombs: u8, range: u8, speed: u8, slow: u8, wins: u8, streak: u8, kills: u8, suicides: u8, sheep_deaths: u8, deaths: u8, bits: u16, held: u8, mine_held: u8, build_held: u8, fire_held: u8, placed: u8, ghost: u16, napalm: u16, drunk: u16, kick: u8, unkick: u8, mines: u8, missiles: u8, builds: u8, dir_bombs: u8, flamer: u8, fireballs: u8, kind: Character, name: u8[..12] }
 // dir: None when still, otherwise slides; m: ticks since its last step; flags: bit 0 = unkickable, bit 1 = warped; fire_lvl: 1..15 flame linger; blast_dir: None for 4-way, else single-direction blast.
 struct Bomb { x: u8, y: u8, t: u16, range: u8, owner: u8, dir: Dir, m: u8, flags: u8, fire_lvl: u8, blast_dir: Dir }
 // Proximity mine: arms down to 0, then explodes when stepped on or blasted.
@@ -194,7 +198,9 @@ struct Fireball { x: i32, y: i32, dir: Dir, owner: u8, portal_cd: u8, life: u8 }
 // A sheep wanders at random and blocks the way like a movable block. dir: None when grazing; on_fire > 0: blazing & lethal!
 struct Sheep { x: i64, y: i64, alive: u8, dir: Dir, t: u8, portal_cd: u8, on_fire: u16, facing_left: u8 }
 // fences: 2 bits per tile packed into 49 bytes; flame_owner: 4 bits per tile packed into 98 bytes (0..3 player, 4 sheep, 15 none).
-struct State { grid: u8[195], fences: u8[49], flame_owner: u8[98], players: Player[4], bombs: Bomb[..16], mines: Mine[..8], missiles: Missile[4], fireballs: Fireball[..8], sheep: Sheep[2], drops: u8, regrow: u8, map: Map, portals_on: u8, portals: u8[4], power_mask: u32, fuse_ticks: u16, fuse_rand: u8, fire_ticks: u8, fire_rand: u8, fire_range: u8, range_rand: u8, day_night_on: u8, day_phase: u16, match_mode: MatchMode, friendly_fire: u8, vip_slot: u8, round_timer: u16, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
+struct State { grid: u8[195], fences: u8[49], flame_owner: u8[98], players: Player[4], bombs: Bomb[..16], mines: Mine[..8], missiles: Missile[4], fireballs: Fireball[..8], sheep: Sheep[2], drops: u8, regrow: u8, map: Map, portals_on: u8, portals: u8[4], power_mask: u32, fuse_ticks: u16, fuse_rand: u8, fire_ticks: u8, fire_rand: u8, fire_range: u8, range_rand: u8, day_night_on: u8, day_phase: u16, match_mode: MatchMode, friendly_fire: u8, vip_slot: u8, round_timer: u16, round_num: u16, last_kill_victim: u8, last_kill_killer: u8, last_kill_cause: u8, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
+
+struct KillClip { round: i64, victim: u8, killer: u8, cause: u8, label: u8[..64], frames: State[..90] }
 
 // UDP (udp.c): inputs and snapshots fly as datagrams when a client joins with `udp`; the WebSocket stays up for
 // joining, leaving and a slow heartbeat. Each snapshot carries its tick, so stale or reordered ones are dropped.
@@ -455,6 +461,10 @@ fn reset_round(s: State&, r: rng&) {
     s.mines.resize(0);
     s.fireballs.resize(0);
     s.day_phase = 0;
+    s.round_num += 1;
+    s.last_kill_victim = 255;
+    s.last_kill_killer = 255;
+    s.last_kill_cause = CAUSE_NONE;
     s.over = 0;
     s.dance_who = 255;
     // Rotate VIP (Prey or Predator) across active players each round.
@@ -1132,18 +1142,38 @@ fn tick(s: State&, r: rng&, n: i64) {
         if s.players[i].life == Life.Alive {
             let ti = (s.players[i].y / TILE) * W + s.players[i].x / TILE;
             var burned = is_flame(s.grid[ti]);
+            let fo = fowner_get(s, ti);
             if burned && s.match_mode == MatchMode.Teams2v2 && s.friendly_fire == 0 {
-                let fo = fowner_get(s, ti);
                 if fo < 4 && fo != i && team_of(fo) == team_of(i) { burned = false; }
             }
+            var by_sheep = false;
             for k in 2 {
                 if s.sheep[k].alive != 0 && s.sheep[k].on_fire > 0 && hits(s.players[i].x, s.players[i].y, s.sheep[k].x, s.sheep[k].y) {
                     burned = true;
+                    by_sheep = true;
                 }
             }
             if burned {
                 s.players[i].life = Life.BlackSheep;
                 s.players[i].held = 1;
+                s.players[i].deaths += 1;
+                s.last_kill_victim = i as u8;
+                if by_sheep {
+                    s.players[i].sheep_deaths += 1;
+                    s.last_kill_killer = 255;
+                    s.last_kill_cause = CAUSE_SHEEP;
+                } else if fo == i {
+                    s.players[i].suicides += 1;
+                    s.last_kill_killer = i as u8;
+                    s.last_kill_cause = CAUSE_SUICIDE;
+                } else if fo < 4 {
+                    s.players[fo].kills += 1;
+                    s.last_kill_killer = fo as u8;
+                    s.last_kill_cause = CAUSE_BOMB;
+                } else {
+                    s.last_kill_killer = 255;
+                    s.last_kill_cause = CAUSE_BOMB;
+                }
             }
             else { alive += 1; last = i; }
         }
@@ -3437,6 +3467,59 @@ fn save_prefs(name: const u8[:], kind: Character, join_addr: const u8[:], playit
     write_file_atomic(path[..], data[..]);
 }
 
+fn replays_dir(out: u8[>..]&) -> bool {
+    out.resize(0);
+    if !env("HOME", out) {
+        out.resize(0);
+        if !env("USERPROFILE", out) { return false; }
+    }
+    out.append("/.bomberman");
+    make_dir(out[..]);
+    out.append("/replays");
+    make_dir(out[..]);
+    return true;
+}
+
+fn format_kill_label(s: State&, victim: i64, killer: i64, cause: u8, out: u8[..64]&) {
+    out.resize(0);
+    var vn: u8[>..] = [];
+    player_name(s, victim, vn);
+    var tmp: u8[>..] = [];
+    if cause == CAUSE_SHEEP {
+        format(tmp, "R", s.round_num, ": ", vn[..], " burned by Flaming Sheep!");
+    } else if cause == CAUSE_SUICIDE || killer == victim {
+        format(tmp, "R", s.round_num, ": ", vn[..], " self-destructed!");
+    } else if killer >= 0 && killer < 4 {
+        var kn: u8[>..] = [];
+        player_name(s, killer, kn);
+        format(tmp, "R", s.round_num, ": ", kn[..], " eliminated ", vn[..], "!");
+    } else {
+        format(tmp, "R", s.round_num, ": ", vn[..], " eliminated!");
+    }
+    for k in min(64, tmp.len) { out.push(tmp[k]); }
+}
+
+fn save_kill_clip(clip: KillClip&, idx: i64) -> bool {
+    var dir: u8[>..] = [];
+    guard replays_dir(dir) else { return false; }
+    var path: u8[>..] = [];
+    format(path, dir[..], "/kill_R", clip.round, "_", idx, ".brep");
+    var one = [clip];
+    var raw: u8[>..] = [];
+    one.to_bytes(raw);
+    return write_file_atomic(path[..], raw[..]);
+}
+
+fn load_kill_clip(filename: const u8[:], out: KillClip&) -> bool {
+    var dir: u8[>..] = [];
+    guard replays_dir(dir) else { return false; }
+    var path: u8[>..] = [];
+    format(path, dir[..], "/", filename);
+    var raw: u8[>..] = [];
+    guard file_exists(path[..]) && read_file(path[..], raw) else { return false; }
+    return http::mail_value(raw[..], out);
+}
+
 fn print_join_hint(label: const u8[:], addr: const u8[:]) {
     print(label, " - friends can join with: ", addr);
     print("  Mac:     ./bomberman-portable join ", addr);
@@ -3622,6 +3705,25 @@ fn main() {
     }
     var menu_open = mode != GameMode.Lobby && frames < 0 && my_name.len == 0;
     var host_open = false;
+    var stats_open = false;
+    var replays_open = false;
+    var ring: State[>..] = [];
+    var clips: KillClip[>..] = [];
+    var active_rec = KillClip { .. };
+    var rec_post = 0;
+    var last_rec_tick = -1;
+    var prev_over_rec: i64 = 0;
+    var prev_life: Life[4] = [Life.Off, Life.Off, Life.Off, Life.Off];
+    var round_clip_start = 0;
+    var reel_active = false;
+    var reel_idx = 0;
+    var reel_end = 0;
+    var reel_f = 0;
+    var reel_tick = 0;
+    var single_watch = false;
+    var watch_clip = KillClip { .. };
+    var replay_msg: u8[..80] = [];
+    var saved_list: u8[>..] = [];
     let z = float2 { 0.0, 0.0 };
     var shown: float2[4] = [z, z, z, z];
     var fx = Fx { .. };
@@ -3698,11 +3800,24 @@ fn main() {
             if frames < 0 { save_prefs(my_name[..], my_kind, join_addr[..], playit_addr[..]); }
         }
         if gfx::key_pressed("Escape") {
-            if host_open { host_open = false; }
+            if single_watch { single_watch = false; }
+            else if reel_active { reel_active = false; }
+            else if replays_open { replays_open = false; }
+            else if stats_open { stats_open = false; }
+            else if host_open { host_open = false; }
             else if menu_open { menu_open = false; }
             else { break; }
         }
-        let typing = mode == GameMode.Lobby || menu_open || host_open || ui::wants_keyboard(menu);
+        if (single_watch || reel_active) && gfx::key_pressed("Space") {
+            if single_watch { single_watch = false; }
+            else {
+                reel_idx += 1;
+                reel_f = 0;
+                if reel_idx >= reel_end { reel_active = false; }
+            }
+        }
+        let typing = mode == GameMode.Lobby || menu_open || host_open || stats_open || replays_open || single_watch || reel_active || ui::wants_keyboard(menu);
+        if !typing && gfx::key_pressed("Tab") { stats_open = !stats_open; }
         if !typing && gfx::key_pressed("N") && !own {          // cycle through all map themes + classic & dark tracks
             track = (track + 1) % 6;
             audio::stop(tune);
@@ -3830,6 +3945,10 @@ fn main() {
                         s.players[who].kind = default_kind(who);
                         s.players[who].wins = 0;
                         s.players[who].streak = 0;
+                        s.players[who].kills = 0;
+                        s.players[who].suicides = 0;
+                        s.players[who].sheep_deaths = 0;
+                        s.players[who].deaths = 0;
                         upeer[who] = -1;
                         uage[who] = 999;
                         uok[who] = false;
@@ -4023,31 +4142,268 @@ fn main() {
                 tune = audio::play(songs[track], if muted { 0.0 } else { mvol }, 0.0, 1.0, true);
             }
         }
+        // Record 30 Hz rolling ring buffer + per-kill replay clips for end-of-round reel & session archive.
+        if mode != GameMode.Lobby && s.tick != last_rec_tick {
+            if s.tick % 2 == 0 {
+                last_rec_tick = s.tick;
+                if s.over == 0 {
+                    if ring.len >= 65 { remove_at(ring, 0); }
+                    ring.push(s);
+                }
+                for i in 4 {
+                    if prev_life[i] == Life.Alive && s.players[i].life != Life.Alive && prev_over_rec == 0 {
+                        if rec_post > 0 && active_rec.frames.len > 0 {
+                            if clips.len >= 32 { remove_at(clips, 0); if round_clip_start > 0 { round_clip_start -= 1; } }
+                            clips.push(active_rec);
+                            rec_post = 0;
+                        }
+                        active_rec = KillClip { round: s.round_num as i64, victim: i as u8, killer: s.last_kill_killer, cause: s.last_kill_cause, .. };
+                        let kc = if s.last_kill_victim == (i as u8) { s.last_kill_cause } else { CAUSE_BOMB };
+                        let kk = if s.last_kill_victim == (i as u8) { s.last_kill_killer as i64 } else { -1 };
+                        format_kill_label(s, i, kk, kc, active_rec.label);
+                        let start_f = max(0, ring.len - 60);
+                        for ri in start_f..ring.len {
+                            if active_rec.frames.len < 90 { active_rec.frames.push(ring[ri]); }
+                        }
+                        rec_post = 20;
+                    }
+                    prev_life[i] = s.players[i].life;
+                }
+                if rec_post > 0 {
+                    if active_rec.frames.len < 90 { active_rec.frames.push(s); }
+                    rec_post -= 1;
+                    if rec_post == 0 {
+                        if clips.len >= 32 { remove_at(clips, 0); if round_clip_start > 0 { round_clip_start -= 1; } }
+                        clips.push(active_rec);
+                    }
+                }
+                if prev_over_rec == 0 && s.over > 0 {
+                    if rec_post > 0 && active_rec.frames.len > 0 {
+                        if clips.len >= 32 { remove_at(clips, 0); if round_clip_start > 0 { round_clip_start -= 1; } }
+                        clips.push(active_rec);
+                        rec_post = 0;
+                    }
+                    if frames < 0 && clips.len > round_clip_start && !single_watch {
+                        reel_active = true;
+                        reel_idx = round_clip_start;
+                        reel_end = clips.len;
+                        reel_f = 0;
+                        reel_tick = 0;
+                    }
+                }
+                if prev_over_rec > 0 && s.over == 0 {
+                    round_clip_start = clips.len;
+                    ring.resize(0);
+                    reel_active = false;
+                }
+                prev_over_rec = s.over;
+            }
+        }
         let draw_mode = match mode {
             Lobby => "lobby",
             Solo => "solo",
             Host => "host",
             Join => if use_udp && udp_rx_age < 45 { "udp" } else { "join" },
         };
-        draw(hud, big, s, shown, fx, draw_mode, sc, atlas, detailed_tex);
         let sz = gfx::screen_size();
         let vw = (sz.x as f32) / sc;
         let vh = (sz.y as f32) / sc;
-        if mode != GameMode.Lobby {
-            let bar_w: f32 = if mode != GameMode.Join { 276.0 } else { 116.0 };
-            let bar_x = vw - bar_w - (if mode == GameMode.Join { 188.0 } else { 108.0 });
+        if single_watch && watch_clip.frames.len > 0 {
+            let rf = min(watch_clip.frames.len - 1, reel_f);
+            var rs = watch_clip.frames[rf];
+            var rshown: float2[4] = [z, z, z, z];
+            for i in 4 { rshown[i] = float2 { rs.players[i].x as f32, rs.players[i].y as f32 }; }
+            var rfx = Fx { .. };
+            draw(hud, big, rs, rshown, rfx, draw_mode, sc, atlas, detailed_tex);
+            if ui::begin(panel, "ReplayBar", ui::rect(14.0, vh - 56.0, vw - 28.0, 44.0), ui::WINDOW_NO_SCROLLBAR) {
+                var rtxt: u8[>..] = [];
+                format(rtxt, "REPLAY: ", watch_clip.label[..], "   [Space / Esc to close]");
+                ui::layout_row_dynamic(panel, 32.0, 1);
+                ui::label(panel, rtxt[..], ui::TEXT_CENTERED);
+            }
+            ui::end(panel);
+            reel_tick += 1;
+            if reel_tick % 3 == 0 {
+                reel_f += 1;
+                if reel_f >= watch_clip.frames.len { reel_f = 0; }
+            }
+        } else if reel_active && reel_idx < reel_end && reel_idx < clips.len && clips[reel_idx].frames.len > 0 {
+            let rf = min(clips[reel_idx].frames.len - 1, reel_f);
+            var rs = clips[reel_idx].frames[rf];
+            var rshown: float2[4] = [z, z, z, z];
+            for i in 4 { rshown[i] = float2 { rs.players[i].x as f32, rs.players[i].y as f32 }; }
+            var rfx = Fx { .. };
+            draw(hud, big, rs, rshown, rfx, draw_mode, sc, atlas, detailed_tex);
+            if ui::begin(panel, "ReelBar", ui::rect(14.0, vh - 56.0, vw - 28.0, 44.0), ui::WINDOW_NO_SCROLLBAR) {
+                var rtxt: u8[>..] = [];
+                format(rtxt, "KILL REPLAY ", reel_idx - round_clip_start + 1, "/", reel_end - round_clip_start, " - ", clips[reel_idx].label[..], "  [Space: Skip]");
+                ui::layout_row_dynamic(panel, 32.0, 1);
+                ui::label(panel, rtxt[..], ui::TEXT_CENTERED);
+            }
+            ui::end(panel);
+            reel_tick += 1;
+            if reel_tick % 3 == 0 {
+                reel_f += 1;
+                if reel_f >= clips[reel_idx].frames.len {
+                    reel_idx += 1;
+                    reel_f = 0;
+                    if reel_idx >= reel_end { reel_active = false; }
+                }
+            }
+        } else {
+            draw(hud, big, s, shown, fx, draw_mode, sc, atlas, detailed_tex);
+        }
+        if mode != GameMode.Lobby && !single_watch && !reel_active {
+            let is_host_or_solo = mode != GameMode.Join;
+            let bar_w: f32 = if is_host_or_solo { 440.0 } else { 300.0 };
+            let bar_x = max(12.0, vw - bar_w - (if mode == GameMode.Join { 196.0 } else { 152.0 }));
             if ui::begin(panel, "Bar", ui::rect(bar_x, 5.0, bar_w, 40.0), ui::WINDOW_NO_SCROLLBAR) {
-                if mode != GameMode.Join {
-                    let rat: f32[2] = [0.40, 0.60];
+                if is_host_or_solo {
+                    let rat: f32[4] = [0.22, 0.22, 0.24, 0.32];
                     ui::layout_row(panel, ui::DYNAMIC, 32.0, rat);
-                    if ui::button_label(panel, "Profile") { menu_open = !menu_open; if menu_open { host_open = false; } }
-                    if ui::button_label(panel, "Host Settings") { host_open = !host_open; if host_open { menu_open = false; } }
+                    if ui::button_label(panel, "Stats") { stats_open = !stats_open; if stats_open { menu_open = false; host_open = false; replays_open = false; } }
+                    if ui::button_label(panel, "Replays") {
+                        replays_open = !replays_open;
+                        if replays_open {
+                            menu_open = false; host_open = false; stats_open = false;
+                            saved_list.resize(0);
+                            var rd: u8[>..] = [];
+                            if replays_dir(rd) { list_dir(rd[..], saved_list); }
+                        }
+                    }
+                    if ui::button_label(panel, "Profile") { menu_open = !menu_open; if menu_open { host_open = false; stats_open = false; replays_open = false; } }
+                    if ui::button_label(panel, "Host Settings") { host_open = !host_open; if host_open { menu_open = false; stats_open = false; replays_open = false; } }
                 } else {
-                    ui::layout_row_dynamic(panel, 32.0, 1);
-                    if ui::button_label(panel, "Profile") { menu_open = !menu_open; }
+                    let rat: f32[3] = [0.30, 0.36, 0.34];
+                    ui::layout_row(panel, ui::DYNAMIC, 32.0, rat);
+                    if ui::button_label(panel, "Stats") { stats_open = !stats_open; if stats_open { menu_open = false; replays_open = false; } }
+                    if ui::button_label(panel, "Replays") {
+                        replays_open = !replays_open;
+                        if replays_open {
+                            menu_open = false; stats_open = false;
+                            saved_list.resize(0);
+                            var rd: u8[>..] = [];
+                            if replays_dir(rd) { list_dir(rd[..], saved_list); }
+                        }
+                    }
+                    if ui::button_label(panel, "Profile") { menu_open = !menu_open; if menu_open { stats_open = false; replays_open = false; } }
                 }
             }
             ui::end(panel);
+        }
+        if stats_open && mode != GameMode.Lobby {
+            let sw: f32 = min(680.0, vw - 24.0);
+            let sh: f32 = min(330.0, vh - 24.0);
+            if ui::begin(menu, "Session Kill & Suicide Stats (Tab)", ui::rect((vw - sw) * 0.5, (vh - sh) * 0.5, sw, sh), ui::WINDOW_BORDER | ui::WINDOW_TITLE | ui::WINDOW_NO_SCROLLBAR) {
+                let srat: f32[7] = [0.24, 0.12, 0.12, 0.12, 0.14, 0.14, 0.12];
+                ui::layout_row(menu, ui::DYNAMIC, 30.0, srat);
+                ui::label(menu, "Player", ui::TEXT_LEFT);
+                ui::label(menu, "Wins", ui::TEXT_CENTERED);
+                ui::label(menu, "Streak", ui::TEXT_CENTERED);
+                ui::label(menu, "Kills", ui::TEXT_CENTERED);
+                ui::label(menu, "Suicides", ui::TEXT_CENTERED);
+                ui::label(menu, "Sheep", ui::TEXT_CENTERED);
+                ui::label(menu, "Deaths", ui::TEXT_CENTERED);
+                for i in 4 {
+                    if s.players[i].life == Life.Off { continue; }
+                    var nm: u8[>..] = [];
+                    player_name(s, i, nm);
+                    ui::layout_row(menu, ui::DYNAMIC, 32.0, srat);
+                    ui::label(menu, nm[..], ui::TEXT_LEFT);
+                    var b0: u8[>..] = []; format(b0, s.players[i].wins); ui::label(menu, b0[..], ui::TEXT_CENTERED);
+                    var b1: u8[>..] = []; format(b1, s.players[i].streak); ui::label(menu, b1[..], ui::TEXT_CENTERED);
+                    var b2: u8[>..] = []; format(b2, s.players[i].kills); ui::label(menu, b2[..], ui::TEXT_CENTERED);
+                    var b3: u8[>..] = []; format(b3, s.players[i].suicides); ui::label(menu, b3[..], ui::TEXT_CENTERED);
+                    var b4: u8[>..] = []; format(b4, s.players[i].sheep_deaths); ui::label(menu, b4[..], ui::TEXT_CENTERED);
+                    var b5: u8[>..] = []; format(b5, s.players[i].deaths); ui::label(menu, b5[..], ui::TEXT_CENTERED);
+                }
+                ui::layout_row_dynamic(menu, 38.0, 1);
+                if ui::button_label(menu, "Close") { stats_open = false; }
+            }
+            ui::end(menu);
+        }
+        if replays_open && mode != GameMode.Lobby {
+            let rw: f32 = min(680.0, vw - 24.0);
+            let rh: f32 = min(560.0, vh - 24.0);
+            if ui::begin(menu, "Session Kill Replays", ui::rect((vw - rw) * 0.5, (vh - rh) * 0.5, rw, rh), ui::WINDOW_BORDER | ui::WINDOW_TITLE) {
+                let top_rat: f32[3] = [0.52, 0.24, 0.24];
+                ui::layout_row(menu, ui::DYNAMIC, 34.0, top_rat);
+                var hdr: u8[>..] = [];
+                format(hdr, "Session Kills (", clips.len, "):");
+                ui::label(menu, hdr[..], ui::TEXT_LEFT);
+                if ui::button_label(menu, "Save All") {
+                    var ok_n = 0;
+                    for ci in clips.len { if save_kill_clip(clips[ci], ci + 1) { ok_n += 1; } }
+                    replay_msg.resize(0);
+                    var tmp: u8[>..] = [];
+                    format(tmp, "Saved ", ok_n, " replays to ~/.bomberman/replays/");
+                    for k in min(80, tmp.len) { replay_msg.push(tmp[k]); }
+                    saved_list.resize(0);
+                    var rd: u8[>..] = [];
+                    if replays_dir(rd) { list_dir(rd[..], saved_list); }
+                }
+                if ui::button_label(menu, "Close") { replays_open = false; }
+                if replay_msg.len > 0 {
+                    ui::layout_row_dynamic(menu, 24.0, 1);
+                    ui::label(menu, replay_msg[..], ui::TEXT_LEFT);
+                }
+                let crat: f32[3] = [0.64, 0.18, 0.18];
+                if clips.len == 0 {
+                    ui::layout_row_dynamic(menu, 28.0, 1);
+                    ui::label(menu, "No kills recorded yet this session.", ui::TEXT_LEFT);
+                }
+                for ci in clips.len {
+                    ui::layout_row(menu, ui::DYNAMIC, 32.0, crat);
+                    ui::label(menu, clips[ci].label[..], ui::TEXT_LEFT);
+                    if ui::button_label(menu, "Watch") {
+                        watch_clip = clips[ci];
+                        single_watch = true;
+                        reel_f = 0;
+                        reel_tick = 0;
+                        replays_open = false;
+                    }
+                    if ui::button_label(menu, "Save") {
+                        let ok = save_kill_clip(clips[ci], ci + 1);
+                        replay_msg.resize(0);
+                        let m = if ok { "Saved replay to ~/.bomberman/replays/" } else { "Failed to save replay" };
+                        for k in min(80, m.len) { replay_msg.push(m[k]); }
+                        saved_list.resize(0);
+                        var rd: u8[>..] = [];
+                        if replays_dir(rd) { list_dir(rd[..], saved_list); }
+                    }
+                }
+                ui::layout_row_dynamic(menu, 28.0, 1);
+                ui::label(menu, "--- Saved Replays on Disk (~/.bomberman/replays/) ---", ui::TEXT_LEFT);
+                let frat: f32[2] = [0.76, 0.24];
+                var lstart = 0;
+                var any_saved = false;
+                for li in saved_list.len + 1 {
+                    if li == saved_list.len || saved_list[li] == 10 {
+                        let fname = saved_list[lstart..li];
+                        if fname.len > 5 && fname[fname.len - 5] == 46 && fname[fname.len - 4] == 98 {
+                            any_saved = true;
+                            ui::layout_row(menu, ui::DYNAMIC, 32.0, frat);
+                            ui::label(menu, fname, ui::TEXT_LEFT);
+                            if ui::button_label(menu, "Watch") {
+                                var lc = KillClip { .. };
+                                if load_kill_clip(fname, lc) && lc.frames.len > 0 {
+                                    watch_clip = lc;
+                                    single_watch = true;
+                                    reel_f = 0;
+                                    reel_tick = 0;
+                                    replays_open = false;
+                                }
+                            }
+                        }
+                        lstart = li + 1;
+                    }
+                }
+                if !any_saved {
+                    ui::layout_row_dynamic(menu, 26.0, 1);
+                    ui::label(menu, "No saved .brep files yet.", ui::TEXT_LEFT);
+                }
+            }
+            ui::end(menu);
         }
         if mode == GameMode.Lobby {
             let lw: f32 = min(650.0, vw - 24.0);
