@@ -120,6 +120,7 @@ extern fn udp_open(port: i64) -> i64;
 extern fn udp_peer(host: const u8[:], port: i64) -> i64;
 extern fn udp_send(fd: i64, b: const u8[:], peer: i64) -> i64;
 extern fn udp_recv(fd: i64, b: u8[:], from: i64&) -> i64;
+extern fn udp_local_ip(b: u8[:]) -> i64;
 
 // Host: input or profile update from a connection (reply names it). Client: key bits or profile to send.
 // seq numbers a client's input steps; the host echoes the latest one it has seen in State.ack.
@@ -2346,6 +2347,14 @@ fn main() {
     if mode == "host" {
         let cfg = http::Config { port: 8080, workers: 1, mail_slots: 64, mail_size: 4096, max_waiting: 16, .. };
         thread_spawn(server, cfg);
+        var ipbuf: u8[>..] = [];
+        ipbuf.resize(64, 0);
+        let iplen = udp_local_ip(ipbuf[..]);
+        var ip: u8[>..] = [];
+        if iplen > 0 { ip.append(ipbuf[0..iplen]); } else { ip.append("<YOUR_IP>"); }
+        print("Hosting on ", ip[..], ":8080 - friends can join with:");
+        print("  Mac:     ./bomberman-portable join ", ip[..]);
+        print("  Windows: bomberman.exe join ", ip[..]);
     }
     if mode == "join" {
         var url: u8[..64] = [];
@@ -2363,8 +2372,8 @@ fn main() {
     let own = file_exists("music.wav") && read_file("music.wav", wav) && wav_pcm(wav, pcm, info);
     if own { print("playing music.wav: ", info[0], " Hz, ", info[1], " channels"); }
     let mvol: f32 = if own { 0.5 } else { 0.2 };
-    let songs: audio::Sound[6] = [make_music_island(r), make_music_forest(r), make_music_mountains(r), make_music_desert(r), make_music(r), make_dark(r)];
-    var track = s.map as i64;
+    let songs: audio::Sound[6] = [make_music_forest(r), make_music_mountains(r), make_music_desert(r), make_music(r), make_dark(r), make_music_island(r)];
+    var track = 0;
     var last_map = s.map;
     var tune = if own { audio::play(audio::create_sound(pcm, info[0], info[1]), mvol, 0.0, 1.0, true) } else { audio::play(songs[track], mvol, 0.0, 1.0, true) };
     var muted = false;
@@ -2676,7 +2685,7 @@ fn main() {
         if s.map != last_map {
             last_map = s.map;
             if !own {
-                track = (s.map & 3) as i64;
+                track = if s.map == MAP_FOREST { 0 } else if s.map == MAP_MOUNTAINS { 1 } else if s.map == MAP_DESERT { 2 } else { 5 };
                 audio::stop(tune);
                 tune = audio::play(songs[track], if muted { 0.0 } else { mvol }, 0.0, 1.0, true);
             }

@@ -92,3 +92,39 @@ int64_t udp_recv(int64_t fd, bslice b, int64_t *from) {
     *from = find_or_add(&a);
     return r;
 }
+
+// Writes the machine's primary outbound IPv4 address (e.g. "192.168.4.46") into b. Returns length, or 0 on failure.
+int64_t udp_local_ip(bslice b) {
+#ifdef _WIN32
+    WSADATA w;
+    WSAStartup(MAKEWORD(2, 2), &w);
+#endif
+    sock_t s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s == BAD) return 0;
+    struct sockaddr_in dst;
+    memset(&dst, 0, sizeof dst);
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(53);
+    dst.sin_addr.s_addr = htonl(0x08080808); // 8.8.8.8 (routing table lookup only; no packet sent)
+    int ok = connect(s, (struct sockaddr *)&dst, sizeof dst) == 0;
+    struct sockaddr_in local;
+    memset(&local, 0, sizeof local);
+#ifdef _WIN32
+    int len = (int)sizeof local;
+#else
+    socklen_t len = sizeof local;
+#endif
+    if (ok) ok = getsockname(s, (struct sockaddr *)&local, &len) == 0;
+#ifdef _WIN32
+    closesocket(s);
+#else
+    close(s);
+#endif
+    if (!ok) return 0;
+    char tmp[64];
+    if (!inet_ntop(AF_INET, &local.sin_addr, tmp, sizeof tmp)) return 0;
+    int64_t n = (int64_t)strlen(tmp);
+    if (n <= 0 || n > b.len) return 0;
+    memcpy(b.data, tmp, (size_t)n);
+    return n;
+}
