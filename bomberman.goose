@@ -198,7 +198,7 @@ struct Fireball { x: i32, y: i32, dir: Dir, owner: u8, portal_cd: u8, life: u8 }
 // A sheep wanders at random and blocks the way like a movable block. dir: None when grazing; on_fire > 0: blazing & lethal!
 struct Sheep { x: i64, y: i64, alive: u8, dir: Dir, t: u8, portal_cd: u8, on_fire: u16, facing_left: u8 }
 // fences: 2 bits per tile packed into 49 bytes; flame_owner: 4 bits per tile packed into 98 bytes (0..3 player, 4 sheep, 15 none).
-struct State { grid: u8[195], fences: u8[49], flame_owner: u8[98], players: Player[4], bombs: Bomb[..16], mines: Mine[..8], missiles: Missile[4], fireballs: Fireball[..8], sheep: Sheep[2], drops: u8, regrow: u8, map: Map, portals_on: u8, portals: u8[4], power_mask: u32, fuse_ticks: u16, fuse_rand: u8, fire_ticks: u8, fire_rand: u8, fire_range: u8, range_rand: u8, day_night_on: u8, day_phase: u16, match_mode: MatchMode, friendly_fire: u8, vip_slot: u8, round_timer: u16, round_num: u16, last_kill_victim: u8, last_kill_killer: u8, last_kill_cause: u8, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
+struct State { grid: u8[195], fences: u8[49], flame_owner: u8[98], players: Player[4], bombs: Bomb[..16], mines: Mine[..8], missiles: Missile[4], fireballs: Fireball[..8], sheep: Sheep[2], drops: u8, regrow: u8, map: Map, portals_on: u8, portals: u8[4], power_mask: u32, fuse_ticks: u16, fuse_rand: u8, fire_ticks: u8, fire_rand: u8, fire_range: u8, range_rand: u8, day_night_on: u8, day_phase: u16, detailed_tex: u8, match_mode: MatchMode, friendly_fire: u8, vip_slot: u8, round_timer: u16, round_num: u16, last_kill_victim: u8, last_kill_killer: u8, last_kill_cause: u8, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
 
 struct KillClip { round: i64, victim: u8, killer: u8, cause: u8, label: u8[..64], frames: State[..90] }
 
@@ -3019,7 +3019,8 @@ fn draw_fog(c: ui::Context, g: u8, x: f32, y: f32, t: f32, tm: f32, viewer_ghost
     ui::fill_circle(c, ui::rect(x + t * 0.72 - r * 0.55 + drift * 0.6, y + t * 0.68 - r * 0.55, r * 1.1, r * 1.1), ui::rgba(164, 178, 198, a));
 }
 
-fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&, mode: const u8[:], sc: f32, atlas: gfx::Texture, detailed_tex: bool) {
+fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&, mode: const u8[:], sc: f32, atlas: gfx::Texture) {
+    let detailed_tex = s.detailed_tex != 0;
     let size = gfx::screen_size();
     let vw = (size.x as f32) / sc;
     let vh = (size.y as f32) / sc;
@@ -3633,6 +3634,8 @@ fn main() {
     s.fire_rand = 0;
     s.fire_range = 2;
     s.range_rand = 0;
+    s.day_night_on = 1;
+    s.detailed_tex = 1;
     s.friendly_fire = 1;
     s.match_mode = MatchMode.FreeForAll;
     reset_round(s, r);
@@ -3677,7 +3680,6 @@ fn main() {
     let sfx = make_sfx(r);
     let night_snd = make_night_sfx(r);
     let atlas = make_tile_atlas();
-    var detailed_tex = false;
     // Your own music: put a 16-bit PCM WAV named music.wav next to the game and it plays instead of the chiptune.
     var wav: u8[>..] = [];
     var pcm: f32[>..] = [];
@@ -3824,7 +3826,7 @@ fn main() {
             tune = audio::play(songs[track], if muted { 0.0 } else { mvol }, 0.0, 1.0, true);
         }
         if !typing && gfx::key_pressed("M") { muted = !muted; audio::set_voice(tune, if muted { 0.0 } else { mvol }, 0.0, 1.0); }
-        if !typing && gfx::key_pressed("T") { detailed_tex = !detailed_tex; }
+        if !typing && mode != GameMode.Join && gfx::key_pressed("T") { s.detailed_tex = if s.detailed_tex != 0 { 0 } else { 1 }; }
         let ndark = night_darkness(s);
         audio::set_voice(night_voice, if muted || mode == GameMode.Lobby { 0.0 } else { ndark * 0.45 }, 0.0, 1.0);
         ui::input_from_gfx(hud);
@@ -4214,7 +4216,7 @@ fn main() {
             var rshown: float2[4] = [z, z, z, z];
             for i in 4 { rshown[i] = float2 { rs.players[i].x as f32, rs.players[i].y as f32 }; }
             var rfx = Fx { .. };
-            draw(hud, big, rs, rshown, rfx, draw_mode, sc, atlas, detailed_tex);
+            draw(hud, big, rs, rshown, rfx, draw_mode, sc, atlas);
             if ui::begin(panel, "ReplayBar", ui::rect(14.0, vh - 56.0, vw - 28.0, 44.0), ui::WINDOW_NO_SCROLLBAR) {
                 var rtxt: u8[>..] = [];
                 format(rtxt, "REPLAY: ", watch_clip.label[..], "   [Space / Esc to close]");
@@ -4233,7 +4235,7 @@ fn main() {
             var rshown: float2[4] = [z, z, z, z];
             for i in 4 { rshown[i] = float2 { rs.players[i].x as f32, rs.players[i].y as f32 }; }
             var rfx = Fx { .. };
-            draw(hud, big, rs, rshown, rfx, draw_mode, sc, atlas, detailed_tex);
+            draw(hud, big, rs, rshown, rfx, draw_mode, sc, atlas);
             if ui::begin(panel, "ReelBar", ui::rect(14.0, vh - 56.0, vw - 28.0, 44.0), ui::WINDOW_NO_SCROLLBAR) {
                 var rtxt: u8[>..] = [];
                 format(rtxt, "KILL REPLAY ", reel_idx - round_clip_start + 1, "/", reel_end - round_clip_start, " - ", clips[reel_idx].label[..], "  [Space: Skip]");
@@ -4251,7 +4253,7 @@ fn main() {
                 }
             }
         } else {
-            draw(hud, big, s, shown, fx, draw_mode, sc, atlas, detailed_tex);
+            draw(hud, big, s, shown, fx, draw_mode, sc, atlas);
         }
         if mode != GameMode.Lobby && !single_watch && !reel_active {
             let is_host_or_solo = mode != GameMode.Join;
@@ -4686,7 +4688,10 @@ fn main() {
                     s.day_night_on = if dn_on { 1 } else { 0 };
                     if s.day_night_on == 0 { s.day_phase = 0; }
                 }
-                ui::checkbox_label(menu, "Detailed Textures (T)", detailed_tex);
+                var dt_on = s.detailed_tex != 0;
+                if ui::checkbox_label(menu, "Detailed Textures (T)", dt_on) {
+                    s.detailed_tex = if dt_on { 1 } else { 0 };
+                }
                 var nm: u32 = 0;
                 if p0 { nm |= PWR_FLAME; }
                 if p1 { nm |= PWR_BOMB; }
@@ -4715,7 +4720,7 @@ fn main() {
         }
         if menu_open && mode != GameMode.Lobby {
             let mw: f32 = min(560.0, vw - 24.0);
-            let mh: f32 = min(430.0, vh - 24.0);
+            let mh: f32 = min(400.0, vh - 24.0);
             if ui::begin(menu, "Player Setup", ui::rect((vw - mw) * 0.5, (vh - mh) * 0.5, mw, mh), ui::WINDOW_BORDER | ui::WINDOW_TITLE | ui::WINDOW_NO_SCROLLBAR) {
                 ui::layout_row_dynamic(menu, 28.0, 1);
                 ui::label(menu, "Your Name (max 12 chars):", ui::TEXT_LEFT);
@@ -4734,8 +4739,6 @@ fn main() {
                 if ui::option_label(menu, "Pig (Bacon)", my_kind == Character.Pig) { my_kind = Character.Pig; }
                 if ui::option_label(menu, "Farmer (Hay Bales)", my_kind == Character.Farmer) { my_kind = Character.Farmer; }
                 let changed = my_kind != prev_kind;
-                ui::layout_row_dynamic(menu, 30.0, 1);
-                ui::checkbox_label(menu, "Detailed Textured Graphics (hotkey T)", detailed_tex);
                 ui::layout_row_dynamic(menu, 42.0, 1);
                 let done = ui::button_label(menu, "Play!") || (ed & ui::EDIT_COMMITTED) != 0;
                 if mode == GameMode.Join {
