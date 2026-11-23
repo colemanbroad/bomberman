@@ -131,6 +131,9 @@ fn dir_from_int(v: i64) -> Dir {
 let TILE_BRUSH: u8 = 128;
 let TILE_GRATE: u8 = 129;
 let TILE_PWR_BUILD: u8 = 130;
+let TILE_PWR_DIRBOMB: u8 = 131;
+let TILE_PWR_FLAMER: u8 = 132;
+let TILE_PWR_FIREBALL: u8 = 133;
 
 let PWR_FLAME: u32 = 1;
 let PWR_BOMB: u32 = 2;
@@ -144,8 +147,11 @@ let PWR_DRUNK: u32 = 256;
 let PWR_BAD: u32 = 512;
 let PWR_UNKICK: u32 = 1024;
 let PWR_BUILD: u32 = 2048;
+let PWR_DIRBOMB: u32 = 4096;
+let PWR_FLAMER: u32 = 8192;
+let PWR_FIREBALL: u32 = 16384;
 let PWR_CLASSIC: u32 = 31;
-let PWR_ALL: u32 = 4095;
+let PWR_ALL: u32 = 32767;
 
 fn is_power(g: u8) -> bool { (g >= 3 && g <= 5) || (g >= 8 && g <= 15) || (g >= 130 && g <= 135) }
 fn is_flame(g: u8) -> bool { g >= 16 && g < 96 }
@@ -167,22 +173,27 @@ fn pick_power(mask: u32, r: rng&) -> u8 {
     if (mask & PWR_BAD) != 0 { opts.push(14); }
     if (mask & PWR_UNKICK) != 0 { opts.push(15); }
     if (mask & PWR_BUILD) != 0 { opts.push(TILE_PWR_BUILD); }
+    if (mask & PWR_DIRBOMB) != 0 { opts.push(TILE_PWR_DIRBOMB); }
+    if (mask & PWR_FLAMER) != 0 { opts.push(TILE_PWR_FLAMER); }
+    if (mask & PWR_FIREBALL) != 0 { opts.push(TILE_PWR_FIREBALL); }
     if opts.len == 0 { return 0; }
     return opts[r.rand_int(opts.len)];
 }
 
 let ROBOTO: const u8[:] = embed_file("Roboto-Regular.ttf");
-struct Player { x: i64, y: i64, life: Life, facing: Dir, portal_cd: u8, bombs: u8, range: u8, speed: u8, slow: u8, wins: u8, streak: u8, bits: u16, held: u8, mine_held: u8, build_held: u8, placed: u8, ghost: u16, napalm: u16, drunk: u16, kick: u8, unkick: u8, mines: u8, missiles: u8, builds: u8, kind: Character, name: u8[..12] }
-// dir: None when still, otherwise slides; m: ticks since its last step; flags: bit 0 = unkickable, bit 1 = warped; fire_lvl: 1..15 flame linger.
-struct Bomb { x: u8, y: u8, t: u16, range: u8, owner: u8, dir: Dir, m: u8, flags: u8, fire_lvl: u8 }
+struct Player { x: i64, y: i64, life: Life, facing: Dir, portal_cd: u8, bombs: u8, range: u8, speed: u8, slow: u8, wins: u8, streak: u8, bits: u16, held: u8, mine_held: u8, build_held: u8, fire_held: u8, placed: u8, ghost: u16, napalm: u16, drunk: u16, kick: u8, unkick: u8, mines: u8, missiles: u8, builds: u8, dir_bombs: u8, flamer: u8, fireballs: u8, kind: Character, name: u8[..12] }
+// dir: None when still, otherwise slides; m: ticks since its last step; flags: bit 0 = unkickable, bit 1 = warped; fire_lvl: 1..15 flame linger; blast_dir: None for 4-way, else single-direction blast.
+struct Bomb { x: u8, y: u8, t: u16, range: u8, owner: u8, dir: Dir, m: u8, flags: u8, fire_lvl: u8, blast_dir: Dir }
 // Proximity mine: arms down to 0, then explodes when stepped on or blasted.
 struct Mine { x: u8, y: u8, owner: u8, arm: u8 }
 // Player-steered heat-seeker missile: while active, the owner stands still wearing a headset.
 struct Missile { x: i32, y: i32, active: u8, dir: Dir, portal_cd: u8, t: u16 }
+// Fireball projectile launched by Fireball Thrower (`F`).
+struct Fireball { x: i32, y: i32, dir: Dir, owner: u8, portal_cd: u8, life: u8 }
 // A sheep wanders at random and blocks the way like a movable block. dir: None when grazing.
 struct Sheep { x: i64, y: i64, alive: u8, dir: Dir, t: u8, portal_cd: u8 }
 // fences: 2 bits per tile packed into 49 bytes (bit 0 = right edge, bit 1 = bottom edge); permanent boundary barriers.
-struct State { grid: u8[195], fences: u8[49], players: Player[4], bombs: Bomb[..16], mines: Mine[..8], missiles: Missile[4], sheep: Sheep[2], drops: u8, regrow: u8, map: Map, portals_on: u8, portals: u8[4], power_mask: u32, fuse_ticks: u16, fuse_rand: u8, fire_ticks: u8, fire_rand: u8, fire_range: u8, range_rand: u8, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
+struct State { grid: u8[195], fences: u8[49], players: Player[4], bombs: Bomb[..16], mines: Mine[..8], missiles: Missile[4], fireballs: Fireball[..8], sheep: Sheep[2], drops: u8, regrow: u8, map: Map, portals_on: u8, portals: u8[4], power_mask: u32, fuse_ticks: u16, fuse_rand: u8, fire_ticks: u8, fire_rand: u8, fire_range: u8, range_rand: u8, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
 
 // UDP (udp.c): inputs and snapshots fly as datagrams when a client joins with `udp`; the WebSocket stays up for
 // joining, leaving and a slow heartbeat. Each snapshot carries its tick, so stale or reordered ones are dropped.
@@ -391,6 +402,7 @@ fn reset_round(s: State&, r: rng&) {
         s.players[i].held = 0;
         s.players[i].mine_held = 0;
         s.players[i].build_held = 0;
+        s.players[i].fire_held = 0;
         s.players[i].ghost = 0;
         s.players[i].napalm = 0;
         s.players[i].drunk = 0;
@@ -399,6 +411,9 @@ fn reset_round(s: State&, r: rng&) {
         s.players[i].mines = 0;
         s.players[i].missiles = 0;
         s.players[i].builds = 0;
+        s.players[i].dir_bombs = 0;
+        s.players[i].flamer = 0;
+        s.players[i].fireballs = 0;
     }
     for k in 2 {
         let tx = if k == 0 { 5 } else { W - 6 };
@@ -418,6 +433,7 @@ fn reset_round(s: State&, r: rng&) {
     }
     s.bombs.resize(0);
     s.mines.resize(0);
+    s.fireballs.resize(0);
     s.over = 0;
     s.dance_who = 255;
 }
@@ -428,29 +444,43 @@ fn flame(s: State&, i: i64, lvl: i64) {
     s.grid[i] = if g == 6 { 2 } else if g == 7 || (g >= 48 && g < 64) { 48 + lv } else if g == 2 || (g >= 32 && g < 48) { 32 + lv } else { 16 + lv };
 }
 
+fn explode_arm(s: State&, bx: i64, by: i64, dx: i64, dy: i64, rng: i64, fire_lvl: i64) {
+    for k in 1..rng + 1 {
+        let tx = bx + dx * k;
+        let ty = by + dy * k;
+        if tx < 0 || tx >= W || ty < 0 || ty >= H { break; }
+        let g = s.grid[ty * W + tx];
+        if g == 1 { break; }
+        if g == TILE_GRATE { continue; } // semi-permeable: flames pass straight through
+        flame(s, ty * W + tx, fire_lvl);
+        if g == 2 || g == 6 || g == 7 { break; }
+        let o = bomb_at(s, tx, ty);
+        if o >= 0 { s.bombs[o].t = 0; break; }
+    }
+}
+
 // Explosion at tile bx by with arm length rng and flame linger level (1..15): blocks stop an arm, other bombs are set off.
 fn explode_at(s: State&, bx: i64, by: i64, rng: i64, fire_lvl: i64) {
     if bx <= 0 || bx >= W - 1 || by <= 0 || by >= H - 1 { return; }
     flame(s, by * W + bx, fire_lvl);
-    for d in 4 {
-        let dx = if d == 0 { 1 } else if d == 1 { -1 } else { 0 };
-        let dy = if d == 2 { 1 } else if d == 3 { -1 } else { 0 };
-        for k in 1..rng + 1 {
-            let tx = bx + dx * k;
-            let ty = by + dy * k;
-            if tx < 0 || tx >= W || ty < 0 || ty >= H { break; }
-            let g = s.grid[ty * W + tx];
-            if g == 1 { break; }
-            if g == TILE_GRATE { continue; } // semi-permeable: flames pass straight through
-            flame(s, ty * W + tx, fire_lvl);
-            if g == 2 || g == 6 || g == 7 { break; }
-            let o = bomb_at(s, tx, ty);
-            if o >= 0 { s.bombs[o].t = 0; break; }
-        }
-    }
+    explode_arm(s, bx, by, 1, 0, rng, fire_lvl);
+    explode_arm(s, bx, by, -1, 0, rng, fire_lvl);
+    explode_arm(s, bx, by, 0, 1, rng, fire_lvl);
+    explode_arm(s, bx, by, 0, -1, rng, fire_lvl);
 }
 
-fn explode(s: State&, b: Bomb) { explode_at(s, b.x as i64, b.y as i64, b.range as i64, b.fire_lvl as i64); }
+fn explode(s: State&, b: Bomb) {
+    let bx = b.x as i64;
+    let by = b.y as i64;
+    if b.blast_dir != Dir.None {
+        if bx > 0 && bx < W - 1 && by > 0 && by < H - 1 {
+            flame(s, by * W + bx, b.fire_lvl as i64);
+            explode_arm(s, bx, by, dir_dx(b.blast_dir), dir_dy(b.blast_dir), (b.range as i64) * 2 + 2, b.fire_lvl as i64);
+        }
+    } else {
+        explode_at(s, bx, by, b.range as i64, b.fire_lvl as i64);
+    }
+}
 
 // Index of a bomb that player i's box would run into at x y (one it is not already standing on), or -1.
 fn bomb_ahead(s: State&, i: i64, x: i64, y: i64) -> i64 {
@@ -589,6 +619,9 @@ fn step_player(s: State&, i: i64) {
             s.players[i].mines += 2;
             s.players[i].missiles += 1;
             s.players[i].builds += 2;
+            s.players[i].dir_bombs += 1;
+            s.players[i].flamer += 2;
+            s.players[i].fireballs += 1;
         }
         else if g == 14 {          // Bad/Curse: longer fire, but slows you down!
             s.players[i].range += 2;
@@ -596,9 +629,27 @@ fn step_player(s: State&, i: i64) {
         }
         else if g == 15 { s.players[i].unkick = 1; }
         else if g == TILE_PWR_BUILD { s.players[i].builds += 3; }
+        else if g == TILE_PWR_DIRBOMB { s.players[i].dir_bombs += 3; }
+        else if g == TILE_PWR_FLAMER { s.players[i].flamer += 4; }
+        else if g == TILE_PWR_FIREBALL { s.players[i].fireballs += 3; }
         s.grid[ty * W + tx] = 0;
     }
     let p = s.players[i];
+    // F fires active weapon: Fireball Thrower (fast projectile) or Flamethrower (3-tile flame jet ahead).
+    let want_fire = (bits & FIRE_KEY) != 0;
+    if want_fire && p.fire_held == 0 {
+        let fdir = if p.facing == Dir.None { Dir.Down } else { p.facing };
+        if p.fireballs > 0 && s.fireballs.len < 8 {
+            let sx = s.players[i].x + dir_dx(fdir) * (TILE / 2);
+            let sy = s.players[i].y + dir_dy(fdir) * (TILE / 2);
+            s.fireballs.push(Fireball { sx as i32, sy as i32, fdir, i as u8, 0, 120 });
+            s.players[i].fireballs -= 1;
+        } else if p.flamer > 0 {
+            explode_arm(s, tx, ty, dir_dx(fdir), dir_dy(fdir), 3, 10);
+            s.players[i].flamer -= 1;
+        }
+    }
+    s.players[i].fire_held = if want_fire { 1 } else { 0 };
     // Q places a destructible brick ahead; Shift+Q places a permanent chain-link boundary fence ahead.
     let want_build = (bits & BUILD_KEY) != 0;
     if want_build && p.build_held == 0 && p.builds > 0 {
@@ -666,7 +717,12 @@ fn step_player(s: State&, i: i64) {
                 lo + (h1 % max(1, hi - lo + 1))
             } else { base_rng };
             let flvl = if s.fire_rand != 0 { 4 + (h2 % 12) } else { 15 };
-            s.bombs.push(Bomb { bx as u8, by as u8, bt as u16, br as u8, i as u8, Dir.None, 0, fl, flvl as u8 });
+            var bdir = Dir.None;
+            if p.dir_bombs > 0 {
+                bdir = if p.facing == Dir.None { Dir.Down } else { p.facing };
+                s.players[i].dir_bombs -= 1;
+            }
+            s.bombs.push(Bomb { bx as u8, by as u8, bt as u16, br as u8, i as u8, Dir.None, 0, fl, flvl as u8, bdir });
             s.players[i].placed += 1;
         }
     }
@@ -867,6 +923,52 @@ fn tick(s: State&, r: rng&, n: i64) {
         if boom {
             explode_at(s, s.missiles[i].x / TILE, s.missiles[i].y / TILE, max(3, s.players[i].range as i64), 15);
             s.missiles[i].active = 0;
+        }
+    }
+    // Step Fireball Thrower projectiles: fast fiery orbs that warp through portals and pass semi-permeable grates.
+    var fi = 0;
+    while fi < s.fireballs.len {
+        let fb = s.fireballs[fi];
+        let otx = (fb.x as i64) / TILE;
+        let oty = (fb.y as i64) / TILE;
+        let sp = 10;
+        var nx = (fb.x as i64) + dir_dx(fb.dir) * sp;
+        var ny = (fb.y as i64) + dir_dy(fb.dir) * sp;
+        let ntx = nx / TILE;
+        let nty = ny / TILE;
+        var hit = fb.life == 0 || ntx <= 0 || ntx >= W - 1 || nty <= 0 || nty >= H - 1;
+        if !hit && (ntx != otx || nty != oty) && fence_between(s, otx, oty, ntx, nty) { hit = true; }
+        if !hit {
+            let g = s.grid[nty * W + ntx];
+            if is_solid_bomb(g) || bomb_at(s, ntx, nty) >= 0 { hit = true; }
+        }
+        if !hit {
+            if s.fireballs[fi].portal_cd > 0 { s.fireballs[fi].portal_cd -= 1; }
+            if s.fireballs[fi].portal_cd == 0 {
+                let dst = portal_dest(s, ntx, nty);
+                if dst.x >= 0 {
+                    nx = dst.x * TILE + TILE / 2;
+                    ny = dst.y * TILE + TILE / 2;
+                    s.fireballs[fi].portal_cd = 12;
+                }
+            }
+            s.fireballs[fi].x = nx as i32;
+            s.fireballs[fi].y = ny as i32;
+            s.fireballs[fi].life -= 1;
+            for j in 4 {
+                if j != (fb.owner as i64) && s.players[j].life == Life.Alive && abs(s.players[j].x - nx) < HB + 10 && abs(s.players[j].y - ny) < HB + 10 { hit = true; }
+            }
+            for k in 2 {
+                if s.sheep[k].alive != 0 && abs(s.sheep[k].x - nx) < HB + 10 && abs(s.sheep[k].y - ny) < HB + 10 { hit = true; }
+            }
+        }
+        if hit {
+            let ex = max(1, min(W - 2, (s.fireballs[fi].x as i64) / TILE));
+            let ey = max(1, min(H - 2, (s.fireballs[fi].y as i64) / TILE));
+            remove_at(s.fireballs, fi);
+            explode_at(s, ex, ey, 1, 12);
+        } else {
+            fi += 1;
         }
     }
     // Step proximity mines: arm down, then detonate if stepped on or hit by flame.
@@ -1419,6 +1521,13 @@ fn hear(prev: State&, s: State&, sfx: Sfx, fx: Fx&) {
             audio::play(sfx.place, 0.7, pan(s.missiles[i].x), 1.6, false);
         }
     }
+    if s.fireballs.len > prev.fireballs.len {
+        let fb = s.fireballs[s.fireballs.len - 1];
+        audio::play(sfx.place, 0.6, pan(fb.x as i64), 1.85, false);
+    } else if s.fireballs.len < prev.fireballs.len {
+        audio::play(sfx.boom, 0.65, pan(prev.fireballs[0].x as i64), 1.35, false);
+        if fx.shake < 4.5 { fx.shake = 4.5; }
+    }
     for i in 4 {
         let a = prev.players[i];
         let b = s.players[i];
@@ -1426,7 +1535,7 @@ fn hear(prev: State&, s: State&, sfx: Sfx, fx: Fx&) {
         let vol = if i == s.you { 0.8 } else { 0.4 };
         if a.life == Life.Alive && b.life != Life.Alive { audio::play(sfx.die, 0.8, pan(b.x), 1.0, false); }
         if abs(b.x - a.x) + abs(b.y - a.y) > TILE * 2 { audio::play(sfx.warp, vol, pan(b.x), 1.0, false); }
-        let got_pwr = b.range + b.bombs + b.speed + b.mines + b.missiles > a.range + a.bombs + a.speed + a.mines + a.missiles ||
+        let got_pwr = b.range + b.bombs + b.speed + b.mines + b.missiles + b.builds + b.dir_bombs + b.flamer + b.fireballs > a.range + a.bombs + a.speed + a.mines + a.missiles + a.builds + a.dir_bombs + a.flamer + a.fireballs ||
                       (a.ghost == 0 && b.ghost > 0) || (a.kick == 0 && b.kick > 0) || (a.unkick == 0 && b.unkick > 0) ||
                       (a.napalm == 0 && b.napalm > 0) || (a.drunk == 0 && b.drunk > 0);
         if got_pwr { audio::play(sfx.pickup, vol, pan(b.x), if b.slow > a.slow { 0.65 } else { 1.0 }, false); }
@@ -1719,6 +1828,9 @@ fn draw_power(c: ui::Context, g: u8, x: f32, y0: f32, t: f32, tm: f32) {
                 else if g == 14 { ui::rgb(96, 42, 112) }
                 else if g == 15 { ui::rgb(52, 74, 98) }
                 else if g == TILE_PWR_BUILD { ui::rgb(156, 94, 48) }
+                else if g == TILE_PWR_DIRBOMB { ui::rgb(198, 148, 24) }
+                else if g == TILE_PWR_FLAMER { ui::rgb(225, 68, 28) }
+                else if g == TILE_PWR_FIREBALL { ui::rgb(235, 112, 18) }
                 else { ui::rgb(30, 150, 205) };
     ui::fill_circle(c, ui::rect(x + t * 0.04, y + t * 0.04, t * 0.92, t * 0.92), ui::rgba(255, 255, 255, 40));
     ui::fill_rect(c, ui::rect(x + t * 0.14, y + t * 0.14, t * 0.72, t * 0.72), t * 0.18, plate);
@@ -1783,6 +1895,17 @@ fn draw_power(c: ui::Context, g: u8, x: f32, y0: f32, t: f32, tm: f32) {
         ui::stroke_line(c, x + t * 0.66, y + t * 0.24, x + t * 0.66, y + t * 0.48, 3.0, ui::rgb(225, 235, 245));
         ui::stroke_line(c, x + t * 0.34, y + t * 0.32, x + t * 0.66, y + t * 0.32, 2.0, ui::rgb(225, 235, 245));
         ui::stroke_line(c, x + t * 0.34, y + t * 0.41, x + t * 0.66, y + t * 0.41, 2.0, ui::rgb(225, 235, 245));
+    } else if g == TILE_PWR_DIRBOMB { // directional bomb (big arrow)
+        ui::fill_rect(c, ui::rect(x + t * 0.22, y + t * 0.42, t * 0.34, t * 0.16), 2.0, ui::rgb(255, 245, 140));
+        ui::fill_triangle(c, x + t * 0.8, y + t * 0.5, x + t * 0.5, y + t * 0.24, x + t * 0.5, y + t * 0.76, ui::rgb(255, 245, 140));
+    } else if g == TILE_PWR_FLAMER { // flamethrower nozzle + flame cone
+        ui::fill_rect(c, ui::rect(x + t * 0.22, y + t * 0.44, t * 0.26, t * 0.14), 2.0, ui::rgb(210, 220, 230));
+        ui::fill_triangle(c, x + t * 0.46, y + t * 0.51, x + t * 0.8, y + t * 0.26, x + t * 0.8, y + t * 0.76, ui::rgb(255, 210, 60));
+        ui::fill_triangle(c, x + t * 0.5, y + t * 0.51, x + t * 0.76, y + t * 0.38, x + t * 0.76, y + t * 0.64, ui::rgb(255, 250, 200));
+    } else if g == TILE_PWR_FIREBALL { // blazing fireball orb + comet tail
+        ui::fill_triangle(c, x + t * 0.2, y + t * 0.62, x + t * 0.56, y + t * 0.32, x + t * 0.66, y + t * 0.68, ui::rgb(255, 130, 30));
+        ui::fill_circle(c, ui::rect(x + t * 0.42, y + t * 0.28, t * 0.36, t * 0.36), ui::rgb(255, 225, 80));
+        ui::fill_circle(c, ui::rect(x + t * 0.5, y + t * 0.36, t * 0.2, t * 0.2), ui::rgb(255, 255, 230));
     } else {             // bolt
         ui::fill_triangle(c, x + t * 0.56, y + t * 0.2, x + t * 0.34, y + t * 0.52, x + t * 0.52, y + t * 0.52, ui::rgb(255, 235, 90));
         ui::fill_triangle(c, x + t * 0.48, y + t * 0.46, x + t * 0.68, y + t * 0.46, x + t * 0.44, y + t * 0.8, ui::rgb(255, 235, 90));
@@ -2141,6 +2264,34 @@ fn draw_bomb(c: ui::Context, s: State&, b: Bomb, ox: f32, oy: f32, t: f32, tm: f
             ui::fill_circle(c, ui::rect(cx + cos(a) * k * 0.52 - 3.5, cy + sin(a) * k * 0.52 - 3.5, 7.0, 7.0), ui::rgb(190, 205, 220));
         }
     }
+    // Directional bomb: bold glowing arrow pointing in blast_dir
+    if b.blast_dir != Dir.None {
+        let dx: f32 = dir_dx(b.blast_dir);
+        let dy: f32 = dir_dy(b.blast_dir);
+        let px = -dy;
+        let py = dx;
+        let tipx = cx + dx * k * 0.48;
+        let tipy = cy + dy * k * 0.48;
+        let bx = cx - dx * k * 0.14;
+        let by = cy - dy * k * 0.14;
+        ui::fill_triangle(c, tipx, tipy, bx + px * k * 0.28, by + py * k * 0.28, bx - px * k * 0.28, by - py * k * 0.28, ui::rgb(255, 240, 80));
+        ui::stroke_triangle(c, tipx, tipy, bx + px * k * 0.28, by + py * k * 0.28, bx - px * k * 0.28, by - py * k * 0.28, 2.0, ui::rgb(40, 20, 5));
+    }
+}
+
+fn draw_fireball(c: ui::Context, fb: Fireball, ox: f32, oy: f32, t: f32, tm: f32) {
+    let cx = ox + (fb.x as f32) / TILE * t;
+    let cy = oy + (fb.y as f32) / TILE * t;
+    let dx: f32 = dir_dx(fb.dir);
+    let dy: f32 = dir_dy(fb.dir);
+    let px = -dy;
+    let py = dx;
+    let r = t * (0.28 + 0.04 * sin(tm * 32.0));
+    // Trailing flame cone
+    ui::fill_triangle(c, cx - dx * r * 2.4, cy - dy * r * 2.4, cx + px * r * 0.9, cy + py * r * 0.9, cx - px * r * 0.9, cy - py * r * 0.9, ui::rgba(255, 85, 20, 210));
+    ui::fill_circle(c, ui::rect(cx - r * 1.15, cy - r * 1.15, r * 2.3, r * 2.3), ui::rgba(255, 130, 30, 220));
+    ui::fill_circle(c, ui::rect(cx - r * 0.8, cy - r * 0.8, r * 1.6, r * 1.6), ui::rgb(255, 220, 70));
+    ui::fill_circle(c, ui::rect(cx - r * 0.4, cy - r * 0.4, r * 0.8, r * 0.8), ui::rgb(255, 255, 230));
 }
 
 fn draw_mine(c: ui::Context, s: State&, m: Mine, ox: f32, oy: f32, t: f32, tm: f32) {
@@ -2488,6 +2639,7 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
         for i in 4 {
             if s.missiles[i].active != 0 { draw_missile(hud, s.missiles[i], i, ox, oy, t, tm); }
         }
+        for fb in s.fireballs { draw_fireball(hud, fb, ox, oy, t, tm); }
         // Fog clouds drawn OVER the arena so Fog Ghosts genuinely obscure vision!
         let viewer_ghost = s.players[s.you].life == Life.FogGhost;
         for ty in H {
@@ -2517,6 +2669,9 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
                 else if me.missiles > 0 { format(st, "Missile x", me.missiles, " [Space]  "); }
                 if me.mines > 0 { format(st, "Mines x", me.mines, " [E/X]  "); }
                 if me.builds > 0 { format(st, "Build x", me.builds, " [Q=Brick, Shift+Q=Fence]  "); }
+                if me.dir_bombs > 0 { format(st, "DirBomb x", me.dir_bombs, " [Space]  "); }
+                if me.fireballs > 0 { format(st, "Fireball x", me.fireballs, " [F]  "); }
+                else if me.flamer > 0 { format(st, "Flamethrower x", me.flamer, " [F]  "); }
                 if me.napalm > 0 { st.append("NAPALM  "); }
                 if me.drunk > 0 { st.append("DRUNK!  "); }
                 if me.unkick != 0 { st.append("AnchorBombs  "); }
@@ -3591,6 +3746,9 @@ fn main() {
                 var p9 = (s.power_mask & PWR_BAD) != 0;
                 var p10 = (s.power_mask & PWR_UNKICK) != 0;
                 var p11 = (s.power_mask & PWR_BUILD) != 0;
+                var p12 = (s.power_mask & PWR_DIRBOMB) != 0;
+                var p13 = (s.power_mask & PWR_FLAMER) != 0;
+                var p14 = (s.power_mask & PWR_FIREBALL) != 0;
                 ui::layout_row_dynamic(menu, 30.0, 2);
                 ui::checkbox_label(menu, "Flame (Range+)", p0);
                 ui::checkbox_label(menu, "Extra Bomb", p1);
@@ -3610,6 +3768,10 @@ fn main() {
                 ui::checkbox_label(menu, "Unkickable Bombs", p10);
                 ui::checkbox_label(menu, "Builder Kit (Q/Shift+Q)", p11);
                 ui::layout_row_dynamic(menu, 30.0, 2);
+                ui::checkbox_label(menu, "Directional Bombs", p12);
+                ui::checkbox_label(menu, "Flamethrower (F)", p13);
+                ui::layout_row_dynamic(menu, 30.0, 2);
+                ui::checkbox_label(menu, "Fireball Thrower (F)", p14);
                 var p_on = s.portals_on != 0;
                 if ui::checkbox_label(menu, "Portals Enabled", p_on) {
                     s.portals_on = if p_on { 1 } else { 0 };
@@ -3631,6 +3793,9 @@ fn main() {
                 if p9 { nm |= PWR_BAD; }
                 if p10 { nm |= PWR_UNKICK; }
                 if p11 { nm |= PWR_BUILD; }
+                if p12 { nm |= PWR_DIRBOMB; }
+                if p13 { nm |= PWR_FLAMER; }
+                if p14 { nm |= PWR_FIREBALL; }
                 s.power_mask = nm;
                 ui::layout_row_dynamic(menu, 38.0, 2);
                 if ui::button_label(menu, "New Round") { reset_round(s, r); host_open = false; }
