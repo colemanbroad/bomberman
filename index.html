@@ -224,7 +224,7 @@ footer p { max-width: 80ch; }
       </div>
       <div class="up">
         <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="6" y="6" width="52" height="52" rx="12" fill="#9c5e30" stroke="#fff" stroke-width="2.5"/><rect x="16" y="34" width="32" height="15" rx="2" fill="#e17a44" stroke="#ffebc8" stroke-width="2"/><path d="M22 17V34M42 17V34M22 22H42M22 28H42" stroke="#e1ebf5" stroke-width="2.5" stroke-linecap="round"/></svg>
-        <div><b>Builder Kit</b><span>Press <kbd>Q</kbd> to wall off a tile with a brick, or <kbd>Shift</kbd>+<kbd>Q</kbd> for a permanent edge fence.</span></div>
+        <div><b>Builder Kit</b><span>Press <kbd>Q</kbd> to place a 2-hit reinforced block ahead, or <kbd>Shift</kbd>+<kbd>Q</kbd> for a 2-hit edge fence (1st hit damages, 2nd destroys).</span></div>
       </div>
       <div class="up">
         <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="6" y="6" width="52" height="52" rx="12" fill="#c69418" stroke="#fff" stroke-width="2.5"/><rect x="14" y="27" width="22" height="10" rx="2" fill="#fff58c"/><path d="M51 32 32 16V48Z" fill="#fff58c"/></svg>
@@ -232,7 +232,7 @@ footer p { max-width: 80ch; }
       </div>
       <div class="up">
         <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="6" y="6" width="52" height="52" rx="12" fill="#e1441c" stroke="#fff" stroke-width="2.5"/><rect x="14" y="28" width="16" height="9" rx="2" fill="#d2dce6"/><path d="M29 32 51 16V48Z" fill="#ffd23c"/><path d="M32 32 48 24V40Z" fill="#fffac8"/></svg>
-        <div><b>Flamethrower</b><span>Tap <kbd>F</kbd> to blast an instant 3-tile jet of fire straight ahead.</span></div>
+        <div><b>Flamethrower</b><span>Continuous roaring flame jet always blazing ahead as you walk—melts blocks, fences, brush, and rivals without burning you.</span></div>
       </div>
       <div class="up">
         <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="6" y="6" width="52" height="52" rx="12" fill="#eb7012" stroke="#fff" stroke-width="2.5"/><path d="M13 40 36 20 42 43Z" fill="#ff821e"/><circle cx="38" cy="29" r="12" fill="#ffe150"/><circle cx="38" cy="29" r="6" fill="#ffffe6"/></svg>
@@ -246,24 +246,24 @@ footer p { max-width: 80ch; }
         <p>Pick your look and themed bombs in <b>Profile</b>: Goose (eggs), Squirrel (acorns), Baby (diapers), Cow (cow patties), Pig (bacon), or Farmer (hay bales).</p>
       </div>
       <div class="card">
-        <h3>Four biomes, textures &amp; music</h3>
-        <p>Fight on <b>Tropical Island</b>, <b>Forest</b>, <b>Mountains</b>, and <b>Desert</b>—each with its own soundtrack (<kbd>N</kbd> cycles tracks, or drop in <code>music.wav</code>). Detailed GPU tile textures are on by default—hosts can toggle classic flat tiles with <kbd>T</kbd>.</p>
+        <h3>Five arenas, textures &amp; synced music</h3>
+        <p>Fight across <b>Tropical Island</b>, <b>Forest</b>, snow-capped <b>Mountains</b>, <b>Desert</b>, and the all-items <b>Sandbox</b> playtest map. Hosts pick the map and music track for everyone (<kbd>N</kbd> cycles tracks, or drop in <code>music.wav</code>) and can toggle GPU tile textures with <kbd>T</kbd>.</p>
       </div>
       <div class="card">
         <h3>Fluffy &amp; flaming sheep</h3>
         <p>Fluffy sheep trot around corridors like living roadblocks—until a blast sets them on fire! Flaming sheep sprint at double speed and roast anyone they touch.</p>
       </div>
       <div class="card">
-        <h3>Brush, grates &amp; fences</h3>
-        <p>Hide from enemies inside burnable <b>Forest Brush</b>, punt bombs and fire right through <b>Semi-Permeable Grates</b>, and trap corridors with edge-only <b>Chain-Link Fences</b>.</p>
+        <h3>Brush, grates &amp; 2-hit fences</h3>
+        <p>Hide from enemies inside burnable <b>Forest Brush</b>, punt bombs and fire right through <b>Semi-Permeable Grates</b>, and block lanes with 2-hit edge <b>Chain-Link Fences</b> and reinforced blocks.</p>
       </div>
       <div class="card">
         <h3>Day &amp; night cycles</h3>
-        <p><b>Day/Night Cycle</b> runs by default (toggleable in Host Settings). When night falls, crickets chirp and blocks and bombs vanish—only glowing eyes and brief explosion flashes light the dark.</p>
+        <p><b>Day/Night Cycle</b> runs by default (toggleable in Host Settings). When night falls, crickets chirp and blocks and bombs vanish—only glowing eyes, flamethrowers, and explosion flashes light the dark.</p>
       </div>
       <div class="card">
-        <h3>Kill replays &amp; session stats</h3>
-        <p>Every round ends with a slow-motion <b>Kill Replay Reel</b>. Open <b>Replays</b> to re-watch or save any kill from the session to disk, and tap <kbd>Tab</kbd> for kills, suicides, and sheep-death stats.</p>
+        <h3>Half-speed kill replays &amp; stats</h3>
+        <p>Every round ends with a <b>1/2-speed Kill Replay Reel</b>. Open <b>Replays</b> to re-watch or save any kill from the session to disk, and tap <kbd>Tab</kbd> for kills, suicides, and sheep-death stats.</p>
       </div>
       <div class="card">
         <h3>Play on after you die</h3>
@@ -271,7 +271,7 @@ footer p { max-width: 80ch; }
       </div>
       <div class="card">
         <h3>Host's sandbox</h3>
-        <p>Tune everything live in <b>Host Settings</b>: mode, map, portals, drop rate, wall regrowth, all 15 power-ups, plus sliders and randomize toggles for bomb fuse, fire duration, and blast extent.</p>
+        <p>Tune everything live in <b>Host Settings</b>: mode, map, synced music, portals, drop rate, wall regrowth, all 15 power-ups, plus sliders and randomize toggles for bomb fuse, fire duration, and blast extent.</p>
       </div>
     </div>
   </section>
@@ -284,13 +284,13 @@ footer p { max-width: 80ch; }
         <tbody>
           <tr><td><kbd>←</kbd> <kbd>↑</kbd> <kbd>↓</kbd> <kbd>→</kbd> or <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd></td><td>Move (or steer an active Heat-Seeker Missile)</td></tr>
           <tr><td><kbd>Space</kbd></td><td>Drop a bomb, launch/detonate a missile, switch Black Sheep / Fog Ghost when dead, or skip a replay</td></tr>
-          <tr><td><kbd>F</kbd></td><td>Fire active weapon (Fireball Thrower or Flamethrower)</td></tr>
-          <tr><td><kbd>Q</kbd> / <kbd>Shift</kbd>+<kbd>Q</kbd></td><td>Place a destructible brick ahead / place a permanent chain-link boundary fence</td></tr>
+          <tr><td><kbd>F</kbd></td><td>Launch a Fireball (when carrying Fireball Thrower)</td></tr>
+          <tr><td><kbd>Q</kbd> / <kbd>Shift</kbd>+<kbd>Q</kbd></td><td>Place a 2-hit reinforced block ahead / place a 2-hit chain-link boundary fence</td></tr>
           <tr><td><kbd>E</kbd> / <kbd>X</kbd> (or <kbd>Shift</kbd>+<kbd>Space</kbd>)</td><td>Plant a proximity mine</td></tr>
           <tr><td><kbd>Shift</kbd></td><td>Hold position: freeze in place and block rivals or kicked bombs</td></tr>
           <tr><td><kbd>T</kbd></td><td>Toggle Detailed Textured Graphics (host only)</td></tr>
           <tr><td><kbd>Tab</kbd></td><td>Show / hide Session Kill &amp; Suicide Stats</td></tr>
-          <tr><td><kbd>M</kbd> / <kbd>N</kbd></td><td>Mute music / cycle built-in tracks</td></tr>
+          <tr><td><kbd>M</kbd> / <kbd>N</kbd></td><td>Mute local music / cycle synced music track (host only)</td></tr>
           <tr><td><kbd>Esc</kbd></td><td>Close open menus or replays, or quit</td></tr>
         </tbody>
       </table>
