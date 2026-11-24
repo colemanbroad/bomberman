@@ -40,6 +40,7 @@ let CAUSE_NONE: u8 = 0;
 let CAUSE_BOMB: u8 = 1;
 let CAUSE_SUICIDE: u8 = 2;
 let CAUSE_SHEEP: u8 = 3;
+let PROTO_VER: i64 = 14;
 
 enum Character { Goose, Squirrel, Baby, Cow, Pig, Farmer }
 enum Map { Island, Forest, Mountains, Desert, Sandbox }
@@ -204,7 +205,7 @@ struct Fireball { x: i32, y: i32, dir: Dir, owner: u8, portal_cd: u8, life: u8 }
 struct Sheep { x: i64, y: i64, alive: u8, dir: Dir, t: u8, portal_cd: u8, on_fire: u16, facing_left: u8 }
 // fences: 4 bits per tile (2 bits per right/bottom edge: 0 none, 1 damaged, 2 intact) packed into 98 bytes;
 // flame_owner: 4 bits per tile packed into 98 bytes (0..3 player, 4 sheep, 15 none).
-struct State { grid: u8[195], fences: u8[98], flame_owner: u8[98], players: Player[4], bombs: Bomb[..16], mines: Mine[..8], missiles: Missile[4], fireballs: Fireball[..8], sheep: Sheep[2], drops: u8, regrow: u8, map: Map, portals_on: u8, portals: u8[4], power_mask: u32, fuse_ticks: u16, fuse_rand: u8, fire_ticks: u8, fire_rand: u8, fire_range: u8, range_rand: u8, day_night_on: u8, day_phase: u16, detailed_tex: u8, match_mode: MatchMode, friendly_fire: u8, vip_slot: u8, round_timer: u16, round_num: u16, last_kill_victim: u8, last_kill_killer: u8, last_kill_cause: u8, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
+struct State { grid: u8[195], fences: u8[98], flame_owner: u8[98], players: Player[4], bombs: Bomb[..16], mines: Mine[..8], missiles: Missile[4], fireballs: Fireball[..8], sheep: Sheep[2], drops: u8, regrow: u8, map: Map, music_track: u8, portals_on: u8, portals: u8[4], power_mask: u32, fuse_ticks: u16, fuse_rand: u8, fire_ticks: u8, fire_rand: u8, fire_range: u8, range_rand: u8, day_night_on: u8, day_phase: u16, detailed_tex: u8, match_mode: MatchMode, friendly_fire: u8, vip_slot: u8, round_timer: u16, round_num: u16, last_kill_victim: u8, last_kill_killer: u8, last_kill_cause: u8, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
 
 struct KillClip { round: i64, victim: u8, killer: u8, cause: u8, label: u8[..64], frames: State[..90] }
 
@@ -230,7 +231,7 @@ enum Msg {
 }
 struct Pad { bits: u16, seq: i64 }
 struct Profile { kind: Character, name: u8[..12] }
-struct Lost { code: i64 }
+struct Lost { code: i64, host_ver: i64 }
 struct UpnpReq { port: i64, enable: bool }
 struct UpnpRes { code: i64, pub_ip: u8[..64], msg: u8[..128] }
 
@@ -1470,18 +1471,26 @@ fn serve_event(ev: http::Event, st: Conn&, out: http::Reply) {
     } else {
         if ev.kind == http::CLOSED && st.reply.key != 0 { post_msg(Msg.Leave { reply: st.reply }); }
         http::ws_read(ev, st.ws, out) { op, data, o =>
-            if st.reply.key == 0 { st.reply = http::later(o, 5000); }
-            if data.len >= 3 && data[0] == 255 {
-                let kd = char_from_u8(data[1]);
-                var nm: u8[..12] = [];
-                let ln = min(data[2] as i64, min(12, data.len - 3));
-                for k in ln { nm.push(data[3 + k]); }
-                post_msg(Msg.Profile { reply: st.reply, kind: kd, name: nm });
-            } else if data.len >= 5 && data[0] == 254 {
-                let b16 = ((data[1] as u16) | ((data[2] as u16) << 8));
-                post_msg(Msg.Input { reply: st.reply, bits: b16, seq: (data[3] as i64) | ((data[4] as i64) << 8) });
-            } else if data.len >= 3 {
-                post_msg(Msg.Input { reply: st.reply, bits: data[0] as u16, seq: (data[1] as i64) | ((data[2] as i64) << 8) });
+            if data.len == 3 && data[0] == 253 {
+                let cv = (data[1] as i64) | ((data[2] as i64) << 8);
+                if cv != PROTO_VER {
+                    var rep: u8[>..] = [253, (PROTO_VER & 255) as u8, ((PROTO_VER >> 8) & 255) as u8];
+                    http::ws_send(o, http::WS_BINARY, rep[..]);
+                }
+            } else {
+                if st.reply.key == 0 { st.reply = http::later(o, 5000); }
+                if data.len >= 3 && data[0] == 255 {
+                    let kd = char_from_u8(data[1]);
+                    var nm: u8[..12] = [];
+                    let ln = min(data[2] as i64, min(12, data.len - 3));
+                    for k in ln { nm.push(data[3 + k]); }
+                    post_msg(Msg.Profile { reply: st.reply, kind: kd, name: nm });
+                } else if data.len >= 5 && data[0] == 254 {
+                    let b16 = ((data[1] as u16) | ((data[2] as u16) << 8));
+                    post_msg(Msg.Input { reply: st.reply, bits: b16, seq: (data[3] as i64) | ((data[4] as i64) << 8) });
+                } else if data.len >= 3 {
+                    post_msg(Msg.Input { reply: st.reply, bits: data[0] as u16, seq: (data[1] as i64) | ((data[2] as i64) << 8) });
+                }
             }
         };
     }
@@ -1517,7 +1526,9 @@ thread_fn upnp_worker(req: UpnpReq) {
 thread_fn client(url: u8[..128]) {
     var session = http::session();
     var conn, err = http::ws_client_connect(session, url[..]);
-    guard err.code == 0 else { write_stderr(str("connect: ", err.call, " ", err.code, "\n")); qput(Lost { 1 }); return; }
+    guard err.code == 0 else { write_stderr(str("connect: ", err.call, " ", err.code, "\n")); qput(Lost { 1, 0 }); return; }
+    var hi: u8[>..] = [253, (PROTO_VER & 255) as u8, ((PROTO_VER >> 8) & 255) as u8];
+    guard http::ws_client_binary(conn, hi).code == 0 else { qput(Lost { 2, 0 }); return; }
     var bits: u16 = 0;
     var seq = 0;
     loop {
@@ -1546,8 +1557,22 @@ thread_fn client(url: u8[..128]) {
         guard http::ws_client_binary(conn, one).code == 0 else { break; }
         let m, e = http::ws_client_recv(conn);
         guard e.code == 0 else { break; }
+        if m.data.len == 3 && m.data[0] == 253 {
+            let hv = (m.data[1] as i64) | ((m.data[2] as i64) << 8);
+            if hv != PROTO_VER {
+                write_stderr(str("version mismatch: host v", hv, ", client v", PROTO_VER, "\n"));
+                qput(Lost { 3, hv });
+                return;
+            }
+            continue;
+        }
         var s = State { .. };
         if http::mail_value(m.data, s) { qput(s); }
+        else {
+            write_stderr(str("version mismatch: incompatible snapshot size ", m.data.len, " (client v", PROTO_VER, ")\n"));
+            qput(Lost { 3, -1 });
+            return;
+        }
         loop {
             let p, ok = qpoll<Pad>();
             guard ok else { break; }
@@ -1555,13 +1580,13 @@ thread_fn client(url: u8[..128]) {
             seq = p.seq;
         }
     }
-    qput(Lost { 2 });
+    qput(Lost { 2, 0 });
 }
 
 // ---- sound ------------------------------------------------------------------------------------
 
 struct Sfx { place: audio::Sound, boom: audio::Sound, pickup: audio::Sound, die: audio::Sound, win: audio::Sound, clank: audio::Sound, dance: audio::Sound, warp: audio::Sound }
-struct Fx { shake: f32, lost: bool, dust: float4[..64], last: float2[4] }
+struct Fx { shake: f32, lost: bool, ver_mismatch: i64, dust: float4[..64], last: float2[4] }
 
 // A synthesized effect: a sine sweeping f0 to f1 mixed with low-passed noise, under a decaying envelope.
 fn synth(r: rng&, secs: f64, f0: f64, f1: f64, noise: f64, decay: f64) -> audio::Sound {
@@ -2047,7 +2072,7 @@ fn make_tile_atlas() -> gfx::Texture {
             for tx in 64 {
                 let n1 = hash2(tx, ty, row * 7 + 1) - 128;
                 let n2 = hash2(tx / 2, ty / 2, row * 13 + 3) - 128;
-                // Col 0: textured biome floor (sand ripples / grass blades / alpine stone / desert dunes)
+                // Col 0: textured biome floor (sand ripples / grass blades / snowy alpine granite / desert dunes)
                 var r0 = fr + n1 / 12 + n2 / 14;
                 var g0 = fg + n1 / 12 + n2 / 14;
                 var b0 = fb + n1 / 14 + n2 / 16;
@@ -2057,32 +2082,92 @@ fn make_tile_atlas() -> gfx::Texture {
                 } else if row == 1 {
                     if (tx * 7 + ty * 3) % 19 == 0 { g0 += 20; r0 -= 8; }
                 } else {
-                    if n2 > 75 { r0 += 22; g0 += 24; b0 += 28; } // snow flecks
+                    // Alpine rocky slate with crisp windswept snowdrifts
+                    let drift = sin((tx as f64) * 0.14 + (ty as f64) * 0.22) * 28.0 + (n2 as f64) * 0.35;
+                    if drift > 14.0 {
+                        r0 = 212 + n1 / 14; g0 = 226 + n1 / 14; b0 = 242 + n1 / 16;
+                    } else if drift > 2.0 {
+                        r0 += 28; g0 += 36; b0 += 48;
+                    }
                 }
                 if tx == 0 || ty == 0 { r0 -= 10; g0 -= 10; b0 -= 10; }
                 set_px(px[..], aw, tx, row * 64 + ty, r0, g0, b0, 255);
 
-                // Col 1: chiseled beveled wall block with subtle stone grain + mortar
-                let edge = min(min(tx, 63 - tx), min(ty, 63 - ty));
-                var bv = if tx < 5 || ty < 5 { 28 } else if tx > 58 || ty > 58 { -34 } else { 0 };
-                if edge < 2 { bv = -45; }
-                let crack = if ((tx + ty * 2) % 29 == 0 && n2 > 40) { -22 } else { 0 };
-                set_px(px[..], aw, 64 + tx, row * 64 + ty, wr + bv + n1 / 10 + crack, wg + bv + n1 / 10 + crack, wb + bv + n1 / 10 + crack, 255);
-
-                // Col 2: detailed masonry / timber brick
-                let brow = ty / 16;
-                let bx = (tx + (brow % 2) * 16) % 32;
-                let by = ty % 16;
-                let mortar = bx < 2 || by < 2;
-                let grain = (hash2(tx, ty / 2, row * 19 + 5) - 128) / 9;
-                if mortar {
-                    set_px(px[..], aw, 128 + tx, row * 64 + ty, br - 62, bg - 54, bb - 42, 255);
+                // Col 1: biome wall (Row 2 = dramatic snow-capped alpine mountain peaks!)
+                if row == 2 {
+                    // Alpine mountain peak tile: deep crisp twilight-slate sky behind twin jagged snow-capped peaks
+                    var mr = 54 + n1 / 18; var mg = 68 + n1 / 18; var mb = 96 + n1 / 16;
+                    if ty < 24 { mr -= 8; mg -= 6; mb += 4; }
+                    // Secondary shoulder peaks (left & right)
+                    let sh_l = 22 + abs(tx - 14) * 14 / 10;
+                    let sh_r = 26 + abs(tx - 52) * 13 / 10;
+                    // Main central jagged peak rising to (32, 5)
+                    let jag = ((hash2(tx / 4, 3, 41) - 128) / 36);
+                    let main_y = 5 + abs(tx - 32) * 18 / 10 + jag;
+                    if ty >= sh_l && ty < main_y {
+                        let sun = tx < 14;
+                        if ty < sh_l + 9 { mr = if sun { 226 } else { 174 }; mg = if sun { 238 } else { 196 }; mb = if sun { 252 } else { 224 }; }
+                        else { mr = if sun { 98 + n1 / 12 } else { 66 + n1 / 12 }; mg = if sun { 112 + n1 / 12 } else { 78 + n1 / 12 }; mb = if sun { 134 + n1 / 12 } else { 102 + n1 / 12 }; }
+                    } else if ty >= sh_r && ty < main_y {
+                        let sun = tx < 52;
+                        if ty < sh_r + 8 { mr = if sun { 224 } else { 170 }; mg = if sun { 236 } else { 192 }; mb = if sun { 250 } else { 222 }; }
+                        else { mr = if sun { 96 + n1 / 12 } else { 64 + n1 / 12 }; mg = if sun { 110 + n1 / 12 } else { 76 + n1 / 12 }; mb = if sun { 132 + n1 / 12 } else { 100 + n1 / 12 }; }
+                    }
+                    if ty >= main_y {
+                        let sun = tx < 32 + ((ty - 5) / 8) * ((ty % 3) - 1);
+                        let snow_line = 26 + ((tx * 5) % 7) - 3;
+                        if ty < snow_line {
+                            // Bright sunlit white snow cap on left face, crisp glacial blue shadow on right face
+                            mr = if sun { 244 + n1 / 24 } else { 182 + n1 / 20 };
+                            mg = if sun { 250 + n1 / 24 } else { 208 + n1 / 20 };
+                            mb = if sun { 255 } else { 238 + n1 / 20 };
+                        } else {
+                            // Craggy granite ridge with diagonal rock striations
+                            let strat = if ((tx + ty * 2) % 11 == 0) { -16 } else { 0 };
+                            mr = (if sun { 116 } else { 68 }) + n1 / 10 + strat;
+                            mg = (if sun { 130 } else { 80 }) + n1 / 10 + strat;
+                            mb = (if sun { 154 } else { 106 }) + n1 / 10 + strat;
+                        }
+                    }
+                    // Dark crisp tile edge border so walls read cleanly as solid grid blocks
+                    if tx == 0 || ty == 0 || tx == 63 || ty == 63 { mr -= 32; mg -= 32; mb -= 28; }
+                    set_px(px[..], aw, 64 + tx, row * 64 + ty, mr, mg, mb, 255);
                 } else {
-                    let bsh = if by < 4 { 18 } else if by > 13 { -20 } else { 0 };
-                    set_px(px[..], aw, 128 + tx, row * 64 + ty, br + bsh + grain, bg + bsh + grain, bb + bsh + grain, 255);
+                    let edge = min(min(tx, 63 - tx), min(ty, 63 - ty));
+                    var bv = if tx < 5 || ty < 5 { 28 } else if tx > 58 || ty > 58 { -34 } else { 0 };
+                    if edge < 2 { bv = -45; }
+                    let crack = if ((tx + ty * 2) % 29 == 0 && n2 > 40) { -22 } else { 0 };
+                    set_px(px[..], aw, 64 + tx, row * 64 + ty, wr + bv + n1 / 10 + crack, wg + bv + n1 / 10 + crack, wb + bv + n1 / 10 + crack, 255);
                 }
 
-                // Col 3: leafy brush canopy (transparent edges)
+                // Col 2: detailed destructible block (Row 2 = frosted glacial ice & snow-capped boulder!)
+                if row == 2 {
+                    let dcx = tx - 32;
+                    let dcy = ty - 34;
+                    let rim = tx < 4 || tx > 59 || ty < 4 || ty > 59;
+                    let snow_top = ty < 15 + ((tx * 3) % 5);
+                    let facet = ((tx - ty + 64) % 19 == 0) || ((tx + ty * 2) % 27 == 0);
+                    var ir = 136 + n1 / 12; var ig = 182 + n1 / 12; var ib = 220 + n1 / 14;
+                    if snow_top { ir = 236 + n1 / 20; ig = 246 + n1 / 20; ib = 255; }
+                    else if facet { ir += 28; ig += 26; ib += 20; }
+                    else if dcx + dcy > 14 { ir -= 26; ig -= 22; ib -= 14; }
+                    if rim { ir -= 46; ig -= 42; ib -= 34; }
+                    set_px(px[..], aw, 128 + tx, row * 64 + ty, ir, ig, ib, 255);
+                } else {
+                    let brow = ty / 16;
+                    let bx = (tx + (brow % 2) * 16) % 32;
+                    let by = ty % 16;
+                    let mortar = bx < 2 || by < 2;
+                    let grain = (hash2(tx, ty / 2, row * 19 + 5) - 128) / 9;
+                    if mortar {
+                        set_px(px[..], aw, 128 + tx, row * 64 + ty, br - 62, bg - 54, bb - 42, 255);
+                    } else {
+                        let bsh = if by < 4 { 18 } else if by > 13 { -20 } else { 0 };
+                        set_px(px[..], aw, 128 + tx, row * 64 + ty, br + bsh + grain, bg + bsh + grain, bb + bsh + grain, 255);
+                    }
+                }
+
+                // Col 3: leafy brush canopy (Row 2 = snow-dusted alpine evergreen!)
                 let dx = tx - 32;
                 let dy = ty - 32;
                 let d2 = dx * dx + dy * dy;
@@ -2090,7 +2175,11 @@ fn make_tile_atlas() -> gfx::Texture {
                 if d2 + wob < 860 {
                     let shade = if d2 < 260 { 22 } else if d2 > 600 { -22 } else { 0 };
                     let leaf = (hash2(tx / 2, ty / 2, row * 29 + 11) - 128) / 6;
-                    set_px(px[..], aw, 192 + tx, row * 64 + ty, lr + shade + leaf, lg + shade + leaf, lb + shade + leaf, 240);
+                    if row == 2 && ty < 28 && (n2 > 10 || d2 < 240) {
+                        set_px(px[..], aw, 192 + tx, row * 64 + ty, 224 + leaf / 2, 238 + leaf / 2, 252, 245);
+                    } else {
+                        set_px(px[..], aw, 192 + tx, row * 64 + ty, lr + shade + leaf, lg + shade + leaf, lb + shade + leaf, 240);
+                    }
                 } else {
                     set_px(px[..], aw, 192 + tx, row * 64 + ty, 0, 0, 0, 0);
                 }
@@ -2155,7 +2244,7 @@ fn map_row(m: Map) -> i64 {
         Forest => { return 1; },
         Mountains => { return 2; },
         Desert => { return 3; },
-        Sandbox => { return 2; },
+        Sandbox => { return 0; },
     }
 }
 
@@ -3603,10 +3692,26 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
             else if s.match_mode == MatchMode.Teams2v2 { tag.append("2v2  "); }
             else if s.match_mode == MatchMode.Predator { tag.append("PREDATOR  "); }
             if mode == "solo" { tag.append("SOLO"); } else if mode == "host" { tag.append("HOST"); } else { format(tag, "CLIENT P", s.you + 1); if mode == "udp" { tag.append(" UDP"); } }
-            if fx.lost { tag.append("  DISCONNECTED"); }
-            text(hud, vw - 14.0 - ui::text_width(ui::font(hud), tag), 10.0, tag, ui::rgb(160, 168, 190));
+            if fx.ver_mismatch != 0 { tag.append("  VERSION MISMATCH"); }
+            else if fx.lost { tag.append("  DISCONNECTED"); }
+            text(hud, vw - 14.0 - ui::text_width(ui::font(hud), tag), 10.0, tag, if fx.ver_mismatch != 0 { ui::rgb(255, 110, 90) } else { ui::rgb(160, 168, 190) });
         } else {
             ui::fill_rect(hud, ui::rect(0, 0, vw, vh), 0.0, ui::rgba(8, 10, 18, 165));
+        }
+        if fx.ver_mismatch != 0 && mode != "lobby" {
+            var vm1: u8[>..] = [];
+            if fx.ver_mismatch > 0 { format(vm1, "VERSION MISMATCH: Host is v", fx.ver_mismatch, ", you are v", PROTO_VER); }
+            else { format(vm1, "VERSION MISMATCH: Host is an older version (you are v", PROTO_VER, ")"); }
+            let vm2 = "Update with play.sh / play.ps1 so host & clients match!";
+            let w1 = ui::text_width(ui::font(hud), vm1);
+            let w2 = ui::text_width(ui::font(hud), vm2);
+            let bw = max(w1, w2) + 48.0;
+            let bx = (vw - bw) * 0.5;
+            let by = vh * 0.36;
+            ui::fill_rect(hud, ui::rect(bx, by, bw, 104.0), 10.0, ui::rgba(42, 10, 14, 240));
+            ui::stroke_rect(hud, ui::rect(bx, by, bw, 104.0), 10.0, 3.0, ui::rgb(255, 82, 82));
+            text(hud, (vw - w1) * 0.5, by + 18.0, vm1, ui::rgb(255, 195, 105));
+            text(hud, (vw - w2) * 0.5, by + 56.0, vm2, ui::rgb(235, 240, 248));
         }
         if is_replay {
             let subtle_p = 0.5 + 0.5 * sin(tm * 5.0);
@@ -4035,6 +4140,7 @@ fn main() {
     s.drops = 33;
     s.regrow = 35;
     s.map = init_map;
+    s.music_track = map_track(init_map) as u8;
     s.portals_on = 1;
     s.power_mask = PWR_ALL;
     s.fuse_ticks = FUSE as u16;
@@ -4097,8 +4203,7 @@ fn main() {
     if own { print("playing music.wav: ", info[0], " Hz, ", info[1], " channels"); }
     let mvol: f32 = if own { 0.5 } else { 0.2 };
     let songs: audio::Sound[6] = [make_music_forest(r), make_music_mountains(r), make_music_desert(r), make_music(r), make_dark(r), make_music_island(r)];
-    var track = 0;
-    var last_map = s.map;
+    var track = map_track(s.map);
     var tune = if own { audio::play(audio::create_sound(pcm, info[0], info[1]), mvol, 0.0, 1.0, true) } else { audio::play(songs[track], mvol, 0.0, 1.0, true) };
     let night_voice = audio::play(night_snd, 0.0, 0.0, 1.0, true);
     var muted = false;
@@ -4253,10 +4358,8 @@ fn main() {
         }
         let typing = mode == GameMode.Lobby || menu_open || host_open || stats_open || replays_open || single_watch || reel_active || ui::wants_keyboard(menu);
         if !typing && gfx::key_pressed("Tab") { stats_open = !stats_open; }
-        if !typing && gfx::key_pressed("N") && !own {          // cycle through all map themes + classic & dark tracks
-            track = (track + 1) % 6;
-            audio::stop(tune);
-            tune = audio::play(songs[track], if muted { 0.0 } else { mvol }, 0.0, 1.0, true);
+        if !typing && mode != GameMode.Join && gfx::key_pressed("N") && !own {          // host cycles music for everyone
+            s.music_track = (((s.music_track as i64) + 1) % 6) as u8;
         }
         if !typing && gfx::key_pressed("M") { muted = !muted; audio::set_voice(tune, if muted { 0.0 } else { mvol }, 0.0, 1.0); }
         if !typing && mode != GameMode.Join && gfx::key_pressed("T") { s.detailed_tex = if s.detailed_tex != 0 { 0 } else { 1 }; }
@@ -4321,7 +4424,10 @@ fn main() {
                 }
             }
             let l, gone = qpoll<Lost>();
-            if gone { fx.lost = true; }
+            if gone {
+                fx.lost = true;
+                if l.code == 3 { fx.ver_mismatch = l.host_ver; }
+            }
             // Predict our own player at 60 Hz and send redundant 8-tick UDP input packets at 60 Hz.
             while acc >= 1.0 / 60.0 {
                 acc -= 1.0 / 60.0;
@@ -4573,10 +4679,10 @@ fn main() {
             if s.players[i].ghost > 0 && moved && fx.dust.len < 64 { fx.dust.push(float4 { shown[i].x, shown[i].y, 0.0, 0.0 }); }
             fx.last[i] = shown[i];
         }
-        if s.map != last_map {
-            last_map = s.map;
+        let want_track = (s.music_track as i64) % 6;
+        if want_track != track {
+            track = want_track;
             if !own {
-                track = map_track(s.map);
                 audio::stop(tune);
                 tune = audio::play(songs[track], if muted { 0.0 } else { mvol }, 0.0, 1.0, true);
             }
@@ -5025,7 +5131,7 @@ fn main() {
                     }
                 }
                 ui::layout_row_dynamic(menu, 28.0, 1);
-                ui::label(menu, "Map (changes music & theme):", ui::TEXT_LEFT);
+                ui::label(menu, "Map (synced to all players):", ui::TEXT_LEFT);
                 let prev_map = s.map;
                 ui::layout_row_dynamic(menu, 32.0, 3);
                 if ui::option_label(menu, "Island", s.map == Map.Island) { s.map = Map.Island; }
@@ -5034,7 +5140,20 @@ fn main() {
                 ui::layout_row_dynamic(menu, 32.0, 2);
                 if ui::option_label(menu, "Desert", s.map == Map.Desert) { s.map = Map.Desert; }
                 if ui::option_label(menu, "Sandbox (All Items)", s.map == Map.Sandbox) { s.map = Map.Sandbox; }
-                if s.map != prev_map { reset_round(s, r); }
+                if s.map != prev_map {
+                    s.music_track = map_track(s.map) as u8;
+                    reset_round(s, r);
+                }
+                ui::layout_row_dynamic(menu, 28.0, 1);
+                ui::label(menu, "Music Track (N cycles - synced to all players):", ui::TEXT_LEFT);
+                ui::layout_row_dynamic(menu, 30.0, 3);
+                if ui::option_label(menu, "Island", s.music_track == 5) { s.music_track = 5; }
+                if ui::option_label(menu, "Forest", s.music_track == 0) { s.music_track = 0; }
+                if ui::option_label(menu, "Mountains", s.music_track == 1) { s.music_track = 1; }
+                ui::layout_row_dynamic(menu, 30.0, 3);
+                if ui::option_label(menu, "Desert", s.music_track == 2) { s.music_track = 2; }
+                if ui::option_label(menu, "Classic", s.music_track == 3) { s.music_track = 3; }
+                if ui::option_label(menu, "Dark", s.music_track == 4) { s.music_track = 4; }
                 ui::layout_row_dynamic(menu, 28.0, 1);
                 var dlbl: u8[>..] = [];
                 format(dlbl, "Power-Up Drop Rate: ", s.drops, "%");
