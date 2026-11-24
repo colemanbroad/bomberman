@@ -27,7 +27,7 @@ let RIGHT = 8;
 let BOMB = 16;
 let HOLD = 32;               // stand your ground: you can't move, and others can't walk through you
 let MINE_KEY = 64;           // E / X drops a proximity mine (Shift+Space also works)
-let BUILD_KEY = 128;         // Q places a brick ahead; Shift+Q places a permanent chain-link fence on the tile edge
+let BUILD_KEY = 128;         // Q places a 2-hit reinforced block ahead; Shift+Q places a 2-hit chain-link fence on the tile edge
 let FIRE_KEY = 256;          // F fires active weapon (flamethrower / fireball)
 let SLIDE = 5;               // ticks a kicked bomb takes per tile
 let GHOST = 600;             // ghost power-up length in ticks
@@ -139,6 +139,7 @@ let TILE_PWR_BUILD: u8 = 130;
 let TILE_PWR_DIRBOMB: u8 = 131;
 let TILE_PWR_FLAMER: u8 = 132;
 let TILE_PWR_FIREBALL: u8 = 133;
+let TILE_STEEL_DMG: u8 = 136;
 
 let PWR_FLAME: u32 = 1;
 let PWR_BOMB: u32 = 2;
@@ -158,11 +159,11 @@ let PWR_FIREBALL: u32 = 16384;
 let PWR_CLASSIC: u32 = 31;
 let PWR_ALL: u32 = 32767;
 
-fn is_power(g: u8) -> bool { (g >= 3 && g <= 5) || (g >= 8 && g <= 15) || (g >= 130 && g <= 135) }
+fn is_power(g: u8) -> bool { (g >= 3 && g <= 5) || (g >= 8 && g <= 15) || (g >= 130 && g <= 133) }
 fn is_flame(g: u8) -> bool { g >= 16 && g < 96 }
 fn is_fog(g: u8) -> bool { g >= 96 && g < 128 }
-fn is_solid(g: u8) -> bool { g == 1 || g == 2 || g == 6 || g == 7 || g == TILE_GRATE }
-fn is_solid_bomb(g: u8) -> bool { g == 1 || g == 2 || g == 6 || g == 7 }
+fn is_solid(g: u8) -> bool { g == 1 || g == 2 || g == 6 || g == 7 || g == TILE_GRATE || g == TILE_STEEL_DMG }
+fn is_solid_bomb(g: u8) -> bool { g == 1 || g == 2 || g == 6 || g == 7 || g == TILE_STEEL_DMG }
 
 fn pick_power(mask: u32, r: rng&) -> u8 {
     var opts: u8[..20] = [];
@@ -197,8 +198,9 @@ struct Missile { x: i32, y: i32, active: u8, dir: Dir, portal_cd: u8, t: u16 }
 struct Fireball { x: i32, y: i32, dir: Dir, owner: u8, portal_cd: u8, life: u8 }
 // A sheep wanders at random and blocks the way like a movable block. dir: None when grazing; on_fire > 0: blazing & lethal!
 struct Sheep { x: i64, y: i64, alive: u8, dir: Dir, t: u8, portal_cd: u8, on_fire: u16, facing_left: u8 }
-// fences: 2 bits per tile packed into 49 bytes; flame_owner: 4 bits per tile packed into 98 bytes (0..3 player, 4 sheep, 15 none).
-struct State { grid: u8[195], fences: u8[49], flame_owner: u8[98], players: Player[4], bombs: Bomb[..16], mines: Mine[..8], missiles: Missile[4], fireballs: Fireball[..8], sheep: Sheep[2], drops: u8, regrow: u8, map: Map, portals_on: u8, portals: u8[4], power_mask: u32, fuse_ticks: u16, fuse_rand: u8, fire_ticks: u8, fire_rand: u8, fire_range: u8, range_rand: u8, day_night_on: u8, day_phase: u16, detailed_tex: u8, match_mode: MatchMode, friendly_fire: u8, vip_slot: u8, round_timer: u16, round_num: u16, last_kill_victim: u8, last_kill_killer: u8, last_kill_cause: u8, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
+// fences: 4 bits per tile (2 bits per right/bottom edge: 0 none, 1 damaged, 2 intact) packed into 98 bytes;
+// flame_owner: 4 bits per tile packed into 98 bytes (0..3 player, 4 sheep, 15 none).
+struct State { grid: u8[195], fences: u8[98], flame_owner: u8[98], players: Player[4], bombs: Bomb[..16], mines: Mine[..8], missiles: Missile[4], fireballs: Fireball[..8], sheep: Sheep[2], drops: u8, regrow: u8, map: Map, portals_on: u8, portals: u8[4], power_mask: u32, fuse_ticks: u16, fuse_rand: u8, fire_ticks: u8, fire_rand: u8, fire_range: u8, range_rand: u8, day_night_on: u8, day_phase: u16, detailed_tex: u8, match_mode: MatchMode, friendly_fire: u8, vip_slot: u8, round_timer: u16, round_num: u16, last_kill_victim: u8, last_kill_killer: u8, last_kill_cause: u8, over: i64, dance_who: u8, you: u8, ack: i64, tick: i64 }   // drops: percent of brick fires that leave a power-up
 
 struct KillClip { round: i64, victim: u8, killer: u8, cause: u8, label: u8[..64], frames: State[..90] }
 
@@ -276,16 +278,35 @@ fn fowner_set(s: State&, idx: i64, who: i64) {
     else { s.flame_owner[bi] = (s.flame_owner[bi] & 15) | (v << 4); }
 }
 
+fn fence_state(s: State&, tx: i64, ty: i64, bit: i64) -> i64 {
+    if tx < 0 || tx >= W || ty < 0 || ty >= H { return 0; }
+    let idx = ty * W + tx;
+    let sh = (idx & 1) * 4 + bit * 2;
+    return ((s.fences[idx / 2] as i64) >> sh) & 3;
+}
+
+fn fence_set_state(s: State&, tx: i64, ty: i64, bit: i64, st: i64) {
+    if tx < 0 || tx >= W || ty < 0 || ty >= H { return; }
+    let idx = ty * W + tx;
+    let sh = (idx & 1) * 4 + bit * 2;
+    let bi = idx / 2;
+    let mask = 255 ^ (3 << sh);
+    s.fences[bi] = (((s.fences[bi] as i64) & mask) | ((st & 3) << sh)) as u8;
+}
+
 fn fence_get(s: State&, tx: i64, ty: i64, bit: i64) -> bool {
-    if tx < 0 || tx >= W || ty < 0 || ty >= H { return false; }
-    let idx = (ty * W + tx) * 2 + bit;
-    return (s.fences[idx / 8] & ((1 << (idx & 7)) as u8)) != 0;
+    return fence_state(s, tx, ty, bit) > 0;
 }
 
 fn fence_set(s: State&, tx: i64, ty: i64, bit: i64) {
-    if tx < 0 || tx >= W || ty < 0 || ty >= H { return; }
-    let idx = (ty * W + tx) * 2 + bit;
-    s.fences[idx / 8] |= (1 << (idx & 7)) as u8;
+    fence_set_state(s, tx, ty, bit, 2);
+}
+
+fn fence_hit(s: State&, tx: i64, ty: i64, bit: i64) -> bool {
+    let st = fence_state(s, tx, ty, bit);
+    if st == 0 { return false; }
+    fence_set_state(s, tx, ty, bit, if st >= 2 { 1 } else { 0 });
+    return true;
 }
 
 fn fence_between(s: State&, ax: i64, ay: i64, bx: i64, by: i64) -> bool {
@@ -293,6 +314,14 @@ fn fence_between(s: State&, ax: i64, ay: i64, bx: i64, by: i64) -> bool {
     if bx == ax - 1 && by == ay { return fence_get(s, bx, ay, 0); }
     if by == ay + 1 && bx == ax { return fence_get(s, ax, ay, 1); }
     if by == ay - 1 && bx == ax { return fence_get(s, ax, by, 1); }
+    return false;
+}
+
+fn fence_hit_between(s: State&, ax: i64, ay: i64, bx: i64, by: i64) -> bool {
+    if bx == ax + 1 && by == ay { return fence_hit(s, ax, ay, 0); }
+    if bx == ax - 1 && by == ay { return fence_hit(s, bx, ay, 0); }
+    if by == ay + 1 && bx == ax { return fence_hit(s, ax, ay, 1); }
+    if by == ay - 1 && bx == ax { return fence_hit(s, ax, by, 1); }
     return false;
 }
 
@@ -373,7 +402,7 @@ fn sheep_blocked(s: State&, k: i64, x: i64, y: i64) -> bool {
 }
 
 fn reset_round(s: State&, r: rng&) {
-    for fi in 49 { s.fences[fi] = 0; }
+    for fi in 98 { s.fences[fi] = 0; }
     for fi in 98 { s.flame_owner[fi] = 255; }
     for ty in H {
         for tx in W {
@@ -490,20 +519,24 @@ fn reset_round(s: State&, r: rng&) {
 fn flame(s: State&, i: i64, lvl: i64, owner: i64) {
     let g = s.grid[i];
     let lv = max(1, min(15, lvl)) as u8;
-    s.grid[i] = if g == 6 { 2 } else if g == 7 || (g >= 48 && g < 64) { 48 + lv } else if g == 2 || (g >= 32 && g < 48) { 32 + lv } else { 16 + lv };
+    s.grid[i] = if g == 6 { TILE_STEEL_DMG } else if g == 7 || (g >= 48 && g < 64) { 48 + lv } else if g == 2 || g == TILE_STEEL_DMG || (g >= 32 && g < 48) { 32 + lv } else { 16 + lv };
     fowner_set(s, i, owner);
 }
 
 fn explode_arm(s: State&, bx: i64, by: i64, dx: i64, dy: i64, rng: i64, fire_lvl: i64, owner: i64) {
     for k in 1..rng + 1 {
+        let px = bx + dx * (k - 1);
+        let py = by + dy * (k - 1);
         let tx = bx + dx * k;
         let ty = by + dy * k;
         if tx < 0 || tx >= W || ty < 0 || ty >= H { break; }
+        // Fences take 2 hits: 1st hit damages them, 2nd hit destroys them.
+        if fence_hit_between(s, px, py, tx, ty) { break; }
         let g = s.grid[ty * W + tx];
         if g == 1 { break; }
         if g == TILE_GRATE { continue; } // semi-permeable: flames pass straight through
         flame(s, ty * W + tx, fire_lvl, owner);
-        if g == 2 || g == 6 || g == 7 { break; }
+        if g == 2 || g == 6 || g == 7 || g == TILE_STEEL_DMG { break; }
         let o = bomb_at(s, tx, ty);
         if o >= 0 { s.bombs[o].t = 0; break; }
     }
@@ -704,7 +737,7 @@ fn step_player(s: State&, i: i64) {
         }
     }
     s.players[i].fire_held = if want_fire { 1 } else { 0 };
-    // Q places a destructible brick ahead; Shift+Q places a permanent chain-link boundary fence ahead.
+    // Q places a 2-hit reinforced block ahead; Shift+Q places a 2-hit chain-link fence ahead (1st hit damages, 2nd destroys).
     let want_build = (bits & BUILD_KEY) != 0;
     if want_build && p.build_held == 0 && p.builds > 0 {
         let fdir = if p.facing == Dir.None { Dir.Down } else { p.facing };
@@ -728,7 +761,7 @@ fn step_player(s: State&, i: i64) {
                 if s.sheep[k].alive != 0 && s.sheep[k].x / TILE == btx && s.sheep[k].y / TILE == bty { occ = true; }
             }
             if !occ {
-                s.grid[bty * W + btx] = 2;
+                s.grid[bty * W + btx] = 6;
                 s.players[i].builds -= 1;
             }
         }
@@ -1103,7 +1136,7 @@ fn tick(s: State&, r: rng&, n: i64) {
             var blocks = 0;
             for i in W * H {
                 let g = s.grid[i];
-                if g == 2 || g == 6 || g == 7 { blocks += 1; }
+                if g == 2 || g == 6 || g == 7 || g == TILE_STEEL_DMG { blocks += 1; }
             }
             if blocks < 34 {
                 for tries in 24 {
@@ -1724,8 +1757,18 @@ fn hear(prev: State&, s: State&, sfx: Sfx, fx: Fx&) {
         }
     }
     for i in W * H {
-        if prev.grid[i] == 6 && s.grid[i] == 2 { audio::play(sfx.clank, 0.5, pan((i % W) * TILE), 1.0, false); }
+        if prev.grid[i] == 6 && s.grid[i] == TILE_STEEL_DMG { audio::play(sfx.clank, 0.55, pan((i % W) * TILE), 1.05, false); }
         else if prev.grid[i] == 0 && (s.grid[i] == 2 || s.grid[i] == 6 || s.grid[i] == 7) { audio::play(sfx.clank, 0.3, pan((i % W) * TILE), 0.7, false); }
+    }
+    for ty in H {
+        for tx in W {
+            for bit in 2 {
+                let a = fence_state(prev, tx, ty, bit);
+                let b = fence_state(s, tx, ty, bit);
+                if b < a { audio::play(sfx.clank, 0.6, pan(tx * TILE), if b == 1 { 1.25 } else { 0.75 }, false); }
+                else if b > a { audio::play(sfx.clank, 0.35, pan(tx * TILE), 0.9, false); }
+            }
+        }
     }
     for k in 2 {
         if prev.sheep[k].alive != 0 && s.sheep[k].alive == 0 { audio::play(sfx.die, 0.6, pan(s.sheep[k].x), 1.6, false); }
@@ -1935,6 +1978,22 @@ fn make_tile_atlas() -> gfx::Texture {
             if frame { set_px(px[..], aw, 384 + tx, 192 + ty, 152 + n, 178 + n, 204 + n, 255); }
             else if mesh { set_px(px[..], aw, 384 + tx, 192 + ty, 184 + n, 212 + n, 236 + n, 220); }
             else { set_px(px[..], aw, 384 + tx, 192 + ty, 30, 44, 62, 65); }
+
+            // Col 7: damaged/cracked reinforced steel crate (1 hit left before destruction!)
+            let fx = (tx as f32) + 0.5;
+            let fy = (ty as f32) + 0.5;
+            let dcrack1 = min(seg_dist(fx, fy, 10.0, 12.0, 28.0, 30.0), seg_dist(fx, fy, 28.0, 30.0, 52.0, 46.0));
+            let dcrack2 = min(seg_dist(fx, fy, 28.0, 30.0, 18.0, 52.0), seg_dist(fx, fy, 38.0, 14.0, 28.0, 30.0));
+            let dcrack = min(dcrack1, dcrack2);
+            var dr = 64 + n; var dg = 58 + n; var db = 66 + n;
+            if border || diag { dr += 32; dg += 22; db += 20; }
+            if rivet && (tx < 32 || ty > 32) { dr = 185; dg = 148; db = 112; }
+            if dcrack < 2.2 {
+                dr = 24; dg = 16; db = 14;
+            } else if dcrack < 4.5 {
+                dr = 215; dg = 104; db = 48;
+            }
+            set_px(px[..], aw, 448 + tx, 192 + ty, dr, dg, db, 255);
         }
     }
     let tex = gfx::texture2d(aw, ah);
@@ -2138,6 +2197,19 @@ fn draw_steel(c: ui::Context, x: f32, y: f32, t: f32) {
     ui::fill_circle(c, ui::rect(x + t * 0.4, y + t * 0.4, t * 0.2, t * 0.2), ui::rgb(255, 120, 80));
 }
 
+fn draw_steel_dmg(c: ui::Context, x: f32, y: f32, t: f32) {
+    let rim = ui::rgb(158, 124, 102);
+    ui::fill_rect(c, ui::rect(x, y, t, t), 6.0, ui::rgb(64, 54, 58));
+    ui::stroke_rect(c, ui::rect(x + 2.0, y + 2.0, t - 4.0, t - 4.0), 5.0, 3.0, rim);
+    ui::stroke_line(c, x + t * 0.16, y + t * 0.18, x + t * 0.45, y + t * 0.48, 5.0, ui::rgb(225, 112, 52));
+    ui::stroke_line(c, x + t * 0.45, y + t * 0.48, x + t * 0.82, y + t * 0.72, 5.0, ui::rgb(225, 112, 52));
+    ui::stroke_line(c, x + t * 0.45, y + t * 0.48, x + t * 0.28, y + t * 0.82, 5.0, ui::rgb(225, 112, 52));
+    ui::stroke_line(c, x + t * 0.16, y + t * 0.18, x + t * 0.45, y + t * 0.48, 2.5, ui::rgb(22, 16, 14));
+    ui::stroke_line(c, x + t * 0.45, y + t * 0.48, x + t * 0.82, y + t * 0.72, 2.5, ui::rgb(22, 16, 14));
+    ui::stroke_line(c, x + t * 0.45, y + t * 0.48, x + t * 0.28, y + t * 0.82, 2.5, ui::rgb(22, 16, 14));
+    ui::stroke_line(c, x + t * 0.62, y + t * 0.2, x + t * 0.45, y + t * 0.48, 2.5, ui::rgb(22, 16, 14));
+}
+
 // Semi-permeable grate: blocks players & sheep, lets kicked bombs and flames pass straight through.
 fn draw_grate(c: ui::Context, x: f32, y: f32, t: f32) {
     ui::fill_rect(c, ui::rect(x + 2.0, y + 2.0, t - 4.0, t - 4.0), 5.0, ui::rgba(50, 70, 92, 110));
@@ -2188,38 +2260,68 @@ fn draw_brush(c: ui::Context, map: Map, x: f32, y: f32, t: f32, tm: f32, viewer_
     ui::fill_circle(c, ui::rect(x + t * 0.5 + sway, y + t * 0.26, t * 0.26, t * 0.24), hi);
 }
 
-// Permanent chain-link boundary fences drawn on the edges between tiles (take up zero square space).
+// 2-hit chain-link boundary fences drawn on the edges between tiles (take up zero square space).
+// State 2 = intact silver wire; state 1 = visibly damaged/scorched/bent wire (1 hit left before destruction).
 fn draw_fences(c: ui::Context, s: State&, ox: f32, oy: f32, t: f32) {
     let wire = ui::rgb(212, 224, 238);
     let dark = ui::rgb(52, 62, 76);
     let post = ui::rgb(245, 210, 95);
+    let dmg_wire = ui::rgb(225, 118, 56);
+    let dmg_dark = ui::rgb(52, 24, 18);
+    let dmg_post = ui::rgb(175, 92, 52);
     for ty in H {
         for tx in W {
-            if fence_get(s, tx, ty, 0) {
+            let st0 = fence_state(s, tx, ty, 0);
+            if st0 > 0 {
                 let x = ox + (tx + 1) * t;
                 let y = oy + ty * t;
-                ui::stroke_line(c, x, y, x, y + t, 6.0, dark);
-                ui::stroke_line(c, x, y, x, y + t, 3.0, wire);
-                for k in 4 {
-                    let yy = y + t * (0.12 + 0.25 * (k as f32));
-                    ui::stroke_line(c, x - 3.5, yy - 3.5, x + 3.5, yy + 3.5, 1.5, wire);
-                    ui::stroke_line(c, x + 3.5, yy - 3.5, x - 3.5, yy + 3.5, 1.5, wire);
+                if st0 >= 2 {
+                    ui::stroke_line(c, x, y, x, y + t, 6.0, dark);
+                    ui::stroke_line(c, x, y, x, y + t, 3.0, wire);
+                    for k in 4 {
+                        let yy = y + t * (0.12 + 0.25 * (k as f32));
+                        ui::stroke_line(c, x - 3.5, yy - 3.5, x + 3.5, yy + 3.5, 1.5, wire);
+                        ui::stroke_line(c, x + 3.5, yy - 3.5, x - 3.5, yy + 3.5, 1.5, wire);
+                    }
+                    ui::fill_circle(c, ui::rect(x - 4.0, y - 4.0, 8.0, 8.0), post);
+                    ui::fill_circle(c, ui::rect(x - 4.0, y + t - 4.0, 8.0, 8.0), post);
+                } else {
+                    // Damaged vertical fence: scorched orange-rust wire split in the middle with bent jagged ends
+                    ui::stroke_line(c, x, y, x - 2.0, y + t * 0.36, 6.0, dmg_dark);
+                    ui::stroke_line(c, x, y, x - 2.0, y + t * 0.36, 3.0, dmg_wire);
+                    ui::stroke_line(c, x + 2.0, y + t * 0.64, x, y + t, 6.0, dmg_dark);
+                    ui::stroke_line(c, x + 2.0, y + t * 0.64, x, y + t, 3.0, dmg_wire);
+                    ui::stroke_line(c, x - 5.0, y + t * 0.32, x + 3.0, y + t * 0.42, 2.0, dmg_wire);
+                    ui::stroke_line(c, x - 3.0, y + t * 0.58, x + 5.0, y + t * 0.68, 2.0, dmg_wire);
+                    ui::fill_circle(c, ui::rect(x - 3.5, y - 3.5, 7.0, 7.0), dmg_post);
+                    ui::fill_circle(c, ui::rect(x - 3.5, y + t - 3.5, 7.0, 7.0), dmg_post);
                 }
-                ui::fill_circle(c, ui::rect(x - 4.0, y - 4.0, 8.0, 8.0), post);
-                ui::fill_circle(c, ui::rect(x - 4.0, y + t - 4.0, 8.0, 8.0), post);
             }
-            if fence_get(s, tx, ty, 1) {
+            let st1 = fence_state(s, tx, ty, 1);
+            if st1 > 0 {
                 let x = ox + tx * t;
                 let y = oy + (ty + 1) * t;
-                ui::stroke_line(c, x, y, x + t, y, 6.0, dark);
-                ui::stroke_line(c, x, y, x + t, y, 3.0, wire);
-                for k in 4 {
-                    let xx = x + t * (0.12 + 0.25 * (k as f32));
-                    ui::stroke_line(c, xx - 3.5, y - 3.5, xx + 3.5, y + 3.5, 1.5, wire);
-                    ui::stroke_line(c, xx + 3.5, y - 3.5, xx - 3.5, y + 3.5, 1.5, wire);
+                if st1 >= 2 {
+                    ui::stroke_line(c, x, y, x + t, y, 6.0, dark);
+                    ui::stroke_line(c, x, y, x + t, y, 3.0, wire);
+                    for k in 4 {
+                        let xx = x + t * (0.12 + 0.25 * (k as f32));
+                        ui::stroke_line(c, xx - 3.5, y - 3.5, xx + 3.5, y + 3.5, 1.5, wire);
+                        ui::stroke_line(c, xx + 3.5, y - 3.5, xx - 3.5, y + 3.5, 1.5, wire);
+                    }
+                    ui::fill_circle(c, ui::rect(x - 4.0, y - 4.0, 8.0, 8.0), post);
+                    ui::fill_circle(c, ui::rect(x + t - 4.0, y - 4.0, 8.0, 8.0), post);
+                } else {
+                    // Damaged horizontal fence: scorched orange-rust wire split in the middle with bent jagged ends
+                    ui::stroke_line(c, x, y, x + t * 0.36, y - 2.0, 6.0, dmg_dark);
+                    ui::stroke_line(c, x, y, x + t * 0.36, y - 2.0, 3.0, dmg_wire);
+                    ui::stroke_line(c, x + t * 0.64, y + 2.0, x + t, y, 6.0, dmg_dark);
+                    ui::stroke_line(c, x + t * 0.64, y + 2.0, x + t, y, 3.0, dmg_wire);
+                    ui::stroke_line(c, x + t * 0.32, y - 5.0, x + t * 0.42, y + 3.0, 2.0, dmg_wire);
+                    ui::stroke_line(c, x + t * 0.58, y - 3.0, x + t * 0.68, y + 5.0, 2.0, dmg_wire);
+                    ui::fill_circle(c, ui::rect(x - 3.5, y - 3.5, 7.0, 7.0), dmg_post);
+                    ui::fill_circle(c, ui::rect(x + t - 3.5, y - 3.5, 7.0, 7.0), dmg_post);
                 }
-                ui::fill_circle(c, ui::rect(x - 4.0, y - 4.0, 8.0, 8.0), post);
-                ui::fill_circle(c, ui::rect(x + t - 4.0, y - 4.0, 8.0, 8.0), post);
             }
         }
     }
@@ -3099,6 +3201,7 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
                     if g == 1 { draw_atlas_tile(hud, atlas, 1, mrow, x, y, t, 255); }
                     else if g == 2 { draw_atlas_tile(hud, atlas, 2, mrow, x, y, t, 255); }
                     else if g == 6 { draw_atlas_tile(hud, atlas, 4, 3, x, y, t, 255); }
+                    else if g == TILE_STEEL_DMG { draw_atlas_tile(hud, atlas, 7, 3, x, y, t, 255); }
                     else if g == 7 { draw_atlas_tile(hud, atlas, 5, 3, x, y, t, 255); }
                     else if g == TILE_GRATE { draw_atlas_tile(hud, atlas, 6, 3, x, y, t, 255); }
                     else if is_power(g) { draw_power(hud, g, x, y, t, tm); }
@@ -3108,6 +3211,7 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
                     if g == 1 { draw_wall(hud, s.map, x, y, t); }
                     else if g == 2 { draw_brick(hud, s.map, x, y, t); }
                     else if g == 6 { draw_steel(hud, x, y, t); }
+                    else if g == TILE_STEEL_DMG { draw_steel_dmg(hud, x, y, t); }
                     else if g == 7 { draw_gift(hud, x, y, t, tm); }
                     else if g == TILE_GRATE { draw_grate(hud, x, y, t); }
                     else if is_power(g) { draw_power(hud, g, x, y, t, tm); }
@@ -3241,7 +3345,7 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
                 if s.missiles[s.you].active != 0 { st.append("GUIDING MISSILE (Arrows/WASD steer, Space detonate)  "); }
                 else if me.missiles > 0 { format(st, "Missile x", me.missiles, " [Space]  "); }
                 if me.mines > 0 { format(st, "Mines x", me.mines, " [E/X]  "); }
-                if me.builds > 0 { format(st, "Build x", me.builds, " [Q=Brick, Shift+Q=Fence]  "); }
+                if me.builds > 0 { format(st, "Build x", me.builds, " [Q=Block, Shift+Q=Fence]  "); }
                 if me.dir_bombs > 0 { format(st, "DirBomb x", me.dir_bombs, " [Space]  "); }
                 if me.fireballs > 0 { format(st, "Fireball x", me.fireballs, " [F]  "); }
                 else if me.flamer > 0 { format(st, "Flamethrower x", me.flamer, " [F]  "); }
