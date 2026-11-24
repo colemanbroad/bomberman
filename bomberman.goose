@@ -3251,7 +3251,8 @@ fn draw_fog(c: ui::Context, g: u8, x: f32, y: f32, t: f32, tm: f32, viewer_ghost
     ui::fill_circle(c, ui::rect(x + t * 0.72 - r * 0.55 + drift * 0.6, y + t * 0.68 - r * 0.55, r * 1.1, r * 1.1), ui::rgba(164, 178, 198, a));
 }
 
-fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&, mode: const u8[:], sc: f32, atlas: gfx::Texture, is_replay: bool) {
+fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&, mode: const u8[:], sc: f32, atlas: gfx::Texture, replay_age: f32) {
+    let is_replay = replay_age >= 0.0;
     let detailed_tex = s.detailed_tex != 0;
     let size = gfx::screen_size();
     let vw = (size.x as f32) / sc;
@@ -3470,8 +3471,18 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
             ui::fill_rect(hud, ui::rect(0, 0, vw, vh), 0.0, ui::rgba(8, 10, 18, 165));
         }
         if is_replay {
-            let rp_a = (135.0 + 110.0 * (0.5 + 0.5 * sin(tm * 9.0))) as i64;
-            ui::stroke_rect(hud, ui::rect(ox - 8.0, oy - 8.0, t * W + 16.0, t * H + 16.0), 10.0, 5.0, ui::rgba(255, 68, 68, rp_a));
+            let subtle_p = 0.5 + 0.5 * sin(tm * 5.0);
+            let rp_a = (75.0 + 65.0 * subtle_p) as i64;
+            ui::stroke_rect(hud, ui::rect(ox - 8.0, oy - 8.0, t * W + 16.0, t * H + 16.0), 10.0, 3.0, ui::rgba(255, 72, 72, rp_a));
+            // Subtle broadcast pill in the top HUD bar (never covers the arena action!)
+            let btxt = "REPLAY 0.5x";
+            let bw = ui::text_width(ui::font(hud), btxt) + 36.0;
+            let bx = max(12.0, vw - bw - 165.0);
+            ui::fill_rect(hud, ui::rect(bx, 7.0, bw, 34.0), 8.0, ui::rgba(36, 12, 16, 210));
+            ui::stroke_rect(hud, ui::rect(bx, 7.0, bw, 34.0), 8.0, 1.5, ui::rgba(255, 82, 82, 160));
+            let dot_a = (95.0 + 160.0 * subtle_p) as i64;
+            ui::fill_circle(hud, ui::rect(bx + 10.0, 18.0, 12.0, 12.0), ui::rgba(255, 62, 62, dot_a));
+            text(hud, bx + 28.0, 10.0, btxt, ui::rgba(255, 224, 210, 235));
         }
         let show_over = !is_replay && s.over > 0 && s.over <= (if s.dance_who < 4 { 495 } else { 405 });
         if show_over && s.dance_who < 4 {
@@ -3481,23 +3492,24 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
     ui::end(hud);
     let show_big_over = !is_replay && s.over > 0 && s.over <= (if s.dance_who < 4 { 495 } else { 405 });
     if ui::begin(big, "B", ui::rect(0, 0, vw, vh), ui::WINDOW_NO_INPUT | ui::WINDOW_NO_SCROLLBAR) {
-        if is_replay {
-            let pulse = 0.5 + 0.5 * sin(tm * 9.5);
-            if pulse > 0.25 {
-                let rtxt = "REPLAY!";
-                let rw = ui::text_width(ui::font(big), rtxt);
-                let ry = vh * 0.12;
-                let ba = (110.0 + 75.0 * pulse) as i64;
-                let ta = (175.0 + 80.0 * pulse) as i64;
-                ui::fill_rect(big, ui::rect(0.0, ry - 10.0, vw, 118.0), 0.0, ui::rgba(28, 6, 10, ba));
-                ui::fill_rect(big, ui::rect(0.0, ry - 10.0, vw, 4.0), 0.0, ui::rgba(255, 72, 72, ta));
-                ui::fill_rect(big, ui::rect(0.0, ry + 104.0, vw, 4.0), 0.0, ui::rgba(255, 72, 72, ta));
-                let rx = (vw - rw) * 0.5;
-                ui::fill_circle(big, ui::rect(rx - 44.0, ry + 36.0, 26.0, 26.0), ui::rgba(255, 58, 58, ta));
-                ui::fill_circle(big, ui::rect(rx + rw + 18.0, ry + 36.0, 26.0, 26.0), ui::rgba(255, 58, 58, ta));
-                text(big, rx + 4.0, ry + 4.0, rtxt, ui::rgba(0, 0, 0, ta));
-                text(big, rx, ry, rtxt, ui::rgba(255, (215.0 + 40.0 * pulse) as i64, (72.0 + 110.0 * pulse) as i64, ta));
-            }
+        if is_replay && replay_age < 1.1 {
+            // Brief bold "REPLAY!" flash across the screen on entry, then clear completely so action stays unobstructed!
+            let fade = if replay_age > 0.85 { max(0.0, (1.1 - replay_age) / 0.25) } else { 1.0 };
+            let flash = 0.5 + 0.5 * cos(replay_age * 16.0);
+            let vis = (0.35 + 0.65 * flash) * fade;
+            let rtxt = "REPLAY!";
+            let rw = ui::text_width(ui::font(big), rtxt);
+            let ry = vh * 0.40;
+            let ba = (165.0 * vis) as i64;
+            let ta = (255.0 * vis) as i64;
+            ui::fill_rect(big, ui::rect(0.0, ry - 12.0, vw, 122.0), 0.0, ui::rgba(24, 6, 10, ba));
+            ui::fill_rect(big, ui::rect(0.0, ry - 12.0, vw, 4.0), 0.0, ui::rgba(255, 72, 72, ta));
+            ui::fill_rect(big, ui::rect(0.0, ry + 106.0, vw, 4.0), 0.0, ui::rgba(255, 72, 72, ta));
+            let rx = (vw - rw) * 0.5;
+            ui::fill_circle(big, ui::rect(rx - 44.0, ry + 36.0, 26.0, 26.0), ui::rgba(255, 58, 58, ta));
+            ui::fill_circle(big, ui::rect(rx + rw + 18.0, ry + 36.0, 26.0, 26.0), ui::rgba(255, 58, 58, ta));
+            text(big, rx + 4.0, ry + 4.0, rtxt, ui::rgba(0, 0, 0, ta));
+            text(big, rx, ry, rtxt, ui::rgba(255, (215.0 + 40.0 * flash) as i64, (72.0 + 110.0 * flash) as i64, ta));
         } else if show_big_over {
             if s.dance_who < 4 {
                 let who = s.dance_who as i64;
@@ -4002,6 +4014,7 @@ fn main() {
     var reel_end = 0;
     var reel_f = 0;
     var reel_acc = 0.0;
+    var reel_age = 0.0;
     var single_watch = false;
     var watch_clip = KillClip { .. };
     var replay_msg: u8[..80] = [];
@@ -4096,6 +4109,7 @@ fn main() {
                 reel_idx += 1;
                 reel_f = 0;
                 reel_acc = 0.0;
+                reel_age = 0.0;
                 if reel_idx >= reel_end { reel_active = false; }
             }
         }
@@ -4482,6 +4496,7 @@ fn main() {
                             reel_end = clips.len;
                             reel_f = 0;
                             reel_acc = 0.0;
+                            reel_age = 0.0;
                         }
                     }
                 }
@@ -4509,7 +4524,7 @@ fn main() {
             var rshown: float2[4] = [z, z, z, z];
             for i in 4 { rshown[i] = float2 { rs.players[i].x as f32, rs.players[i].y as f32 }; }
             var rfx = Fx { .. };
-            draw(hud, big, rs, rshown, rfx, draw_mode, sc, atlas, true);
+            draw(hud, big, rs, rshown, rfx, draw_mode, sc, atlas, reel_age as f32);
             if ui::begin(panel, "ReplayBar", ui::rect(14.0, vh - 56.0, vw - 28.0, 44.0), ui::WINDOW_NO_SCROLLBAR) {
                 var rtxt: u8[>..] = [];
                 format(rtxt, "REPLAY (1/2x): ", watch_clip.label[..], "   [Space / Esc to close]");
@@ -4517,7 +4532,9 @@ fn main() {
                 ui::label(panel, rtxt[..], ui::TEXT_CENTERED);
             }
             ui::end(panel);
-            reel_acc += min(gfx::delta_time(), 0.1);
+            let rdt = min(gfx::delta_time(), 0.1);
+            reel_age += rdt;
+            reel_acc += rdt;
             while reel_acc >= 1.0 / 15.0 {
                 reel_acc -= 1.0 / 15.0;
                 reel_f += 1;
@@ -4529,7 +4546,7 @@ fn main() {
             var rshown: float2[4] = [z, z, z, z];
             for i in 4 { rshown[i] = float2 { rs.players[i].x as f32, rs.players[i].y as f32 }; }
             var rfx = Fx { .. };
-            draw(hud, big, rs, rshown, rfx, draw_mode, sc, atlas, true);
+            draw(hud, big, rs, rshown, rfx, draw_mode, sc, atlas, reel_age as f32);
             if ui::begin(panel, "ReelBar", ui::rect(14.0, vh - 56.0, vw - 28.0, 44.0), ui::WINDOW_NO_SCROLLBAR) {
                 var rtxt: u8[>..] = [];
                 format(rtxt, "KILL REPLAY (1/2x) ", reel_idx - round_clip_start + 1, "/", reel_end - round_clip_start, " - ", clips[reel_idx].label[..], "  [Space: Skip]");
@@ -4537,18 +4554,21 @@ fn main() {
                 ui::label(panel, rtxt[..], ui::TEXT_CENTERED);
             }
             ui::end(panel);
-            reel_acc += min(gfx::delta_time(), 0.1);
+            let rdt = min(gfx::delta_time(), 0.1);
+            reel_age += rdt;
+            reel_acc += rdt;
             while reel_acc >= 1.0 / 15.0 {
                 reel_acc -= 1.0 / 15.0;
                 reel_f += 1;
                 if reel_f >= clips[reel_idx].frames.len {
                     reel_idx += 1;
                     reel_f = 0;
+                    reel_age = 0.0;
                     if reel_idx >= reel_end { reel_active = false; break; }
                 }
             }
         } else {
-            draw(hud, big, s, shown, fx, draw_mode, sc, atlas, false);
+            draw(hud, big, s, shown, fx, draw_mode, sc, atlas, -1.0);
         }
         if mode != GameMode.Lobby && !single_watch && !reel_active {
             let is_host_or_solo = mode != GameMode.Join;
@@ -4657,6 +4677,7 @@ fn main() {
                         single_watch = true;
                         reel_f = 0;
                         reel_acc = 0.0;
+                        reel_age = 0.0;
                         replays_open = false;
                     }
                     if ui::button_label(menu, "Save") {
@@ -4688,6 +4709,7 @@ fn main() {
                                     single_watch = true;
                                     reel_f = 0;
                                     reel_acc = 0.0;
+                                    reel_age = 0.0;
                                     replays_open = false;
                                 }
                             }
