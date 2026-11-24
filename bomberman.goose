@@ -801,26 +801,66 @@ fn step_player(s: State&, i: i64) {
         let fdir = if p.facing == Dir.None { Dir.Down } else { p.facing };
         let btx = tx + dir_dx(fdir);
         let bty = ty + dir_dy(fdir);
-        if (bits & HOLD) != 0 {
-            if btx > 0 && btx < W - 1 && bty > 0 && bty < H - 1 && !fence_between(s, tx, ty, btx, bty) {
-                if btx == tx + 1 { fence_set(s, tx, ty, 0); }
-                else if btx == tx - 1 { fence_set(s, btx, ty, 0); }
-                else if bty == ty + 1 { fence_set(s, tx, ty, 1); }
-                else if bty == ty - 1 { fence_set(s, tx, bty, 1); }
-                s.players[i].builds -= 1;
-            }
-        } else if btx > 0 && btx < W - 1 && bty > 0 && bty < H - 1 {
-            let tg = s.grid[bty * W + btx];
-            var occ = (tg != 0 && !is_fog(tg)) || is_portal(s, btx, bty) || bomb_at(s, btx, bty) >= 0 || mine_at(s, btx, bty) >= 0;
-            for j in 4 {
-                if (s.players[j].life == Life.Alive || s.players[j].life == Life.BlackSheep) && s.players[j].x / TILE == btx && s.players[j].y / TILE == bty { occ = true; }
-            }
-            for k in 2 {
-                if s.sheep[k].alive != 0 && s.sheep[k].x / TILE == btx && s.sheep[k].y / TILE == bty { occ = true; }
-            }
-            if !occ {
-                s.grid[bty * W + btx] = 6;
-                s.players[i].builds -= 1;
+        if btx > 0 && btx < W - 1 && bty > 0 && bty < H - 1 {
+            // Keep builder's own hitbox cleanly on their side of the new block/fence so they can never get stuck in it.
+            var nx = p.x;
+            var ny = p.y;
+            if btx == tx + 1 { nx = min(nx, (tx + 1) * TILE - HB); }
+            else if btx == tx - 1 { nx = max(nx, tx * TILE + HB); }
+            else if bty == ty + 1 { ny = min(ny, (ty + 1) * TILE - HB); }
+            else if bty == ty - 1 { ny = max(ny, ty * TILE + HB); }
+            let nudge_ok = (nx == p.x && ny == p.y) || !tiles_blocked(s, p.x, p.y, nx, ny);
+            if (bits & HOLD) != 0 {
+                if nudge_ok && !fence_between(s, tx, ty, btx, bty) {
+                    // Reject if any other player or sheep is currently straddling this fence edge.
+                    var edge_busy = false;
+                    let ex = if btx == tx + 1 { (tx + 1) * TILE } else if btx == tx - 1 { tx * TILE } else { -1 };
+                    let ey = if bty == ty + 1 { (ty + 1) * TILE } else if bty == ty - 1 { ty * TILE } else { -1 };
+                    for j in 4 {
+                        if j == i || (s.players[j].life != Life.Alive && s.players[j].life != Life.BlackSheep) { continue; }
+                        let q = s.players[j];
+                        if ex >= 0 && q.x - HB < ex && q.x + HB > ex && q.y + HB > ty * TILE && q.y - HB < (ty + 1) * TILE { edge_busy = true; }
+                        if ey >= 0 && q.y - HB < ey && q.y + HB > ey && q.x + HB > tx * TILE && q.x - HB < (tx + 1) * TILE { edge_busy = true; }
+                    }
+                    for k in 2 {
+                        if s.sheep[k].alive == 0 { continue; }
+                        let q = s.sheep[k];
+                        if ex >= 0 && q.x - HB < ex && q.x + HB > ex && q.y + HB > ty * TILE && q.y - HB < (ty + 1) * TILE { edge_busy = true; }
+                        if ey >= 0 && q.y - HB < ey && q.y + HB > ey && q.x + HB > tx * TILE && q.x - HB < (tx + 1) * TILE { edge_busy = true; }
+                    }
+                    if !edge_busy {
+                        s.players[i].x = nx;
+                        s.players[i].y = ny;
+                        if btx == tx + 1 { fence_set(s, tx, ty, 0); }
+                        else if btx == tx - 1 { fence_set(s, btx, ty, 0); }
+                        else if bty == ty + 1 { fence_set(s, tx, ty, 1); }
+                        else if bty == ty - 1 { fence_set(s, tx, bty, 1); }
+                        s.players[i].builds -= 1;
+                    }
+                }
+            } else if nudge_ok {
+                let tg = s.grid[bty * W + btx];
+                var occ = (tg != 0 && !is_fog(tg)) || is_portal(s, btx, bty) || bomb_at(s, btx, bty) >= 0 || mine_at(s, btx, bty) >= 0;
+                let bx0 = btx * TILE;
+                let bx1 = (btx + 1) * TILE;
+                let by0 = bty * TILE;
+                let by1 = (bty + 1) * TILE;
+                for j in 4 {
+                    if j == i || (s.players[j].life != Life.Alive && s.players[j].life != Life.BlackSheep) { continue; }
+                    let q = s.players[j];
+                    if q.x + HB > bx0 && q.x - HB < bx1 && q.y + HB > by0 && q.y - HB < by1 { occ = true; }
+                }
+                for k in 2 {
+                    if s.sheep[k].alive == 0 { continue; }
+                    let q = s.sheep[k];
+                    if q.x + HB > bx0 && q.x - HB < bx1 && q.y + HB > by0 && q.y - HB < by1 { occ = true; }
+                }
+                if !occ {
+                    s.players[i].x = nx;
+                    s.players[i].y = ny;
+                    s.grid[bty * W + btx] = 6;
+                    s.players[i].builds -= 1;
+                }
             }
         }
     }
