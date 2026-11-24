@@ -850,14 +850,17 @@ fn step_dead(s: State&, i: i64) {
 
 // One 60 Hz step: move, burn, age flames, kill, and decide when a round ends.
 fn tick(s: State&, r: rng&, n: i64) {
-    if s.over > 0 {
+    let was_over = s.over > 0;
+    if was_over {
         s.over -= 1;
-        if s.over == 0 { reset_round(s, r); }
-        return;
+        if s.over == 0 { reset_round(s, r); return; }
     }
     for i in 4 {
         match s.players[i].life {
-            Alive => { step_player(s, i); },
+            Alive => {
+                if was_over { s.players[i].bits = s.players[i].bits & (15 as u16); }
+                step_player(s, i);
+            },
             BlackSheep => { step_dead(s, i); },
             FogGhost => { step_dead(s, i); },
             Off => {},
@@ -1130,6 +1133,7 @@ fn tick(s: State&, r: rng&, n: i64) {
             if s.sheep[k].on_fire == 0 { s.sheep[k].on_fire = 360; s.sheep[k].t = 0; }
         }
     }
+    if was_over { return; }
     if s.match_mode == MatchMode.Prey && s.round_timer > 0 {
         s.round_timer -= 1;
     }
@@ -1252,7 +1256,7 @@ fn tick(s: State&, r: rng&, n: i64) {
         },
     }
     if round_done {
-        s.over = 150;
+        s.over = 450;
         s.dance_who = 255;
         if win_mask != 0 {
             for i in 4 {
@@ -1260,7 +1264,7 @@ fn tick(s: State&, r: rng&, n: i64) {
                     s.players[i].wins += 1;
                     s.players[i].streak += 1;
                     if s.players[i].wins % 5 == 0 && s.dance_who == 255 {
-                        s.over = 270;
+                        s.over = 540;
                         s.dance_who = i as u8;
                     }
                 } else {
@@ -1688,13 +1692,17 @@ fn pan(x: i64) -> f32 { ((x as f32) / ((W * TILE) as f32) - 0.5) * 1.6 }
 
 // Plays what changed between two snapshots, so a client hears what the host's game did.
 fn hear(prev: State&, s: State&, sfx: Sfx, fx: Fx&) {
-    if prev.over == 0 && s.over > 0 {
+    let win_sfx_at = if s.dance_who < 4 { 512 } else { 422 };
+    if prev.over > win_sfx_at && s.over <= win_sfx_at && s.over > 0 {
         if s.dance_who < 4 { audio::play(sfx.dance, 0.9, 0.0, 1.0, false); }
         else {
-            for i in 4 { if s.players[i].life != Life.Off && s.players[i].wins > prev.players[i].wins { audio::play(sfx.win, 0.8, 0.0, 1.0, false); } }
+            var any_win = false;
+            for i in 4 { if s.players[i].life == Life.Alive { any_win = true; } }
+            if any_win { audio::play(sfx.win, 0.8, 0.0, 1.0, false); }
         }
     }
-    guard prev.over == 0 && s.over == 0 else { return; }
+    // Skip only the reset_round transition (prev.over > 0 && s.over == 0); let fatal explosions & aftermath play!
+    guard !(prev.over > 0 && s.over == 0) else { return; }
     let dt = s.tick - prev.tick;
     for i in s.bombs.len {
         let b = s.bombs[i];
@@ -1756,7 +1764,7 @@ fn hear(prev: State&, s: State&, sfx: Sfx, fx: Fx&) {
                       (a.ghost == 0 && b.ghost > 0) || (a.kick == 0 && b.kick > 0) || (a.unkick == 0 && b.unkick > 0) ||
                       (a.napalm == 0 && b.napalm > 0) || (a.drunk == 0 && b.drunk > 0);
         if got_pwr { audio::play(sfx.pickup, vol, pan(b.x), if b.slow > a.slow { 0.65 } else { 1.0 }, false); }
-        if b.wins > a.wins { audio::play(sfx.win, 0.8, 0.0, 1.0, false); }
+        if b.wins > a.wins && s.over == 0 { audio::play(sfx.win, 0.8, 0.0, 1.0, false); }
     }
 }
 
@@ -1771,6 +1779,54 @@ fn set_px(buf: u8[:], w: i64, x: i64, y: i64, r: i64, g: i64, b: i64, a: i64) {
     buf[i + 1] = max(0, min(255, g)) as u8;
     buf[i + 2] = max(0, min(255, b)) as u8;
     buf[i + 3] = max(0, min(255, a)) as u8;
+}
+
+fn seg_dist(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+    let vx = bx - ax;
+    let vy = by - ay;
+    let l2 = vx * vx + vy * vy;
+    let t = if l2 > 0.0001 { max(0.0, min(1.0, ((px - ax) * vx + (py - ay) * vy) / l2)) } else { 0.0 };
+    let dx = px - (ax + t * vx);
+    let dy = py - (ay + t * vy);
+    return sqrt(dx * dx + dy * dy);
+}
+
+// Crisp 32x32 green checkbox fill with bold anti-aliased white checkmark for checked settings checkboxes.
+fn make_check_tex() -> gfx::Texture {
+    let sz = 32;
+    var px: u8[>..] = [];
+    px.resize(sz * sz * 4, 255);
+    for y in sz {
+        for x in sz {
+            let fx = (x as f32) + 0.5;
+            let fy = (y as f32) + 0.5;
+            // Vibrant emerald background with subtle top sheen & clean inner border
+            var r: f32 = 38.0;
+            var g: f32 = 186.0 - fy * 1.1;
+            var b: f32 = 96.0 - fy * 0.4;
+            if x == 0 || y == 0 || x == sz - 1 || y == sz - 1 {
+                r = 26.0; g = 145.0; b = 72.0;
+            }
+            // Bold two-segment checkmark: (6.5, 16.5) -> (13.0, 23.5) -> (25.5, 9.0)
+            let d = min(seg_dist(fx, fy, 6.5, 16.5, 13.0, 23.5), seg_dist(fx, fy, 13.0, 23.5, 25.5, 9.0));
+            // Subtle dark drop shadow right below the white tick for extra contrast
+            let ds = min(seg_dist(fx, fy - 1.2, 6.5, 16.5, 13.0, 23.5), seg_dist(fx, fy - 1.2, 13.0, 23.5, 25.5, 9.0));
+            if ds < 3.4 {
+                let sa = max(0.0, min(1.0, (3.4 - ds) / 1.2)) * 0.35;
+                r *= (1.0 - sa);
+                g *= (1.0 - sa);
+                b *= (1.0 - sa);
+            }
+            let cov = max(0.0, min(1.0, (3.1 - d) / 1.1));
+            let fr = r * (1.0 - cov) + 255.0 * cov;
+            let fg = g * (1.0 - cov) + 255.0 * cov;
+            let fb = b * (1.0 - cov) + 255.0 * cov;
+            set_px(px[..], sz, x, y, fr as i64, fg as i64, fb as i64, 255);
+        }
+    }
+    let tex = gfx::texture2d(sz, sz);
+    gfx::update_texture(tex, px[..]);
+    return tex;
 }
 
 fn hash2(x: i64, y: i64, seed: i64) -> i64 {
@@ -3019,7 +3075,7 @@ fn draw_fog(c: ui::Context, g: u8, x: f32, y: f32, t: f32, tm: f32, viewer_ghost
     ui::fill_circle(c, ui::rect(x + t * 0.72 - r * 0.55 + drift * 0.6, y + t * 0.68 - r * 0.55, r * 1.1, r * 1.1), ui::rgba(164, 178, 198, a));
 }
 
-fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&, mode: const u8[:], sc: f32, atlas: gfx::Texture) {
+fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&, mode: const u8[:], sc: f32, atlas: gfx::Texture, is_replay: bool) {
     let detailed_tex = s.detailed_tex != 0;
     let size = gfx::screen_size();
     let vw = (size.x as f32) / sc;
@@ -3235,56 +3291,81 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
         } else {
             ui::fill_rect(hud, ui::rect(0, 0, vw, vh), 0.0, ui::rgba(8, 10, 18, 165));
         }
-        if s.over > 0 && s.dance_who < 4 {
+        if is_replay {
+            let rp_a = (135.0 + 110.0 * (0.5 + 0.5 * sin(tm * 9.0))) as i64;
+            ui::stroke_rect(hud, ui::rect(ox - 8.0, oy - 8.0, t * W + 16.0, t * H + 16.0), 10.0, 5.0, ui::rgba(255, 68, 68, rp_a));
+        }
+        let show_over = !is_replay && s.over > 0 && s.over <= (if s.dance_who < 4 { 495 } else { 405 });
+        if show_over && s.dance_who < 4 {
             draw_dance(hud, s, s.dance_who as i64, vw, vh, tm);
         }
     }
     ui::end(hud);
-    if ui::begin(big, "B", ui::rect(0, 0, vw, vh), ui::WINDOW_NO_INPUT | ui::WINDOW_NO_SCROLLBAR) && s.over > 0 {
-        if s.dance_who < 4 {
-            let who = s.dance_who as i64;
-            var nm: u8[>..] = [];
-            player_name(s, who, nm);
-            var title: u8[>..] = [];
-            format(title, nm[..], " - ", s.players[who].wins, " WINS!");
-            let tw = ui::text_width(ui::font(big), title);
-            text(big, (vw - tw) * 0.5, 42.0, title, col(who));
-        } else {
-            var who = -1;
-            for i in 4 { if s.players[i].life == Life.Alive { who = i; } }
-            var msg: u8[>..] = [];
-            match s.match_mode {
-                Teams2v2 => {
-                    var t0_al = 0; var t1_al = 0;
-                    for i in 4 {
-                        if s.players[i].life == Life.Alive {
-                            if team_of(i) == 0 { t0_al += 1; } else { t1_al += 1; }
-                        }
-                    }
-                    if t0_al > 0 && t1_al == 0 { msg.append("TEAM 1 WINS!"); }
-                    else if t1_al > 0 && t0_al == 0 { msg.append("TEAM 2 WINS!"); }
-                    else { msg.append("DRAW"); }
-                },
-                Prey => {
-                    if s.players[s.vip_slot].life == Life.Alive { msg.append("PREY SURVIVED!"); }
-                    else { msg.append("HUNTERS WIN!"); }
-                },
-                Predator => {
-                    if s.players[s.vip_slot].life == Life.Alive { msg.append("PREDATOR WINS!"); }
-                    else { msg.append("RUNNERS WIN!"); }
-                },
-                FreeForAll => {
-                    if who >= 0 && s.players[who].life != Life.Off {
-                        var nm: u8[>..] = [];
-                        player_name(s, who, nm);
-                        if s.players[who].streak >= 2 { format(msg, nm[..], " WINS! (", s.players[who].streak, "x)"); }
-                        else { format(msg, nm[..], " WINS!"); }
-                    } else { msg.append("DRAW"); }
-                },
+    let show_big_over = !is_replay && s.over > 0 && s.over <= (if s.dance_who < 4 { 495 } else { 405 });
+    if ui::begin(big, "B", ui::rect(0, 0, vw, vh), ui::WINDOW_NO_INPUT | ui::WINDOW_NO_SCROLLBAR) {
+        if is_replay {
+            let pulse = 0.5 + 0.5 * sin(tm * 9.5);
+            if pulse > 0.25 {
+                let rtxt = "REPLAY!";
+                let rw = ui::text_width(ui::font(big), rtxt);
+                let ry = vh * 0.12;
+                let ba = (110.0 + 75.0 * pulse) as i64;
+                let ta = (175.0 + 80.0 * pulse) as i64;
+                ui::fill_rect(big, ui::rect(0.0, ry - 10.0, vw, 118.0), 0.0, ui::rgba(28, 6, 10, ba));
+                ui::fill_rect(big, ui::rect(0.0, ry - 10.0, vw, 4.0), 0.0, ui::rgba(255, 72, 72, ta));
+                ui::fill_rect(big, ui::rect(0.0, ry + 104.0, vw, 4.0), 0.0, ui::rgba(255, 72, 72, ta));
+                let rx = (vw - rw) * 0.5;
+                ui::fill_circle(big, ui::rect(rx - 44.0, ry + 36.0, 26.0, 26.0), ui::rgba(255, 58, 58, ta));
+                ui::fill_circle(big, ui::rect(rx + rw + 18.0, ry + 36.0, 26.0, 26.0), ui::rgba(255, 58, 58, ta));
+                text(big, rx + 4.0, ry + 4.0, rtxt, ui::rgba(0, 0, 0, ta));
+                text(big, rx, ry, rtxt, ui::rgba(255, (215.0 + 40.0 * pulse) as i64, (72.0 + 110.0 * pulse) as i64, ta));
             }
-            let w = ui::text_width(ui::font(big), msg);
-            ui::fill_rect(big, ui::rect(0, vh / 2.0 - 75.0, vw, 145.0), 0.0, ui::rgba(10, 12, 20, 195));
-            text(big, (vw - w) / 2.0, vh / 2.0 - 60.0, msg, if who >= 0 { col(who) } else { ui::rgb(230, 230, 235) });
+        } else if show_big_over {
+            if s.dance_who < 4 {
+                let who = s.dance_who as i64;
+                var nm: u8[>..] = [];
+                player_name(s, who, nm);
+                var title: u8[>..] = [];
+                format(title, nm[..], " - ", s.players[who].wins, " WINS!");
+                let tw = ui::text_width(ui::font(big), title);
+                text(big, (vw - tw) * 0.5, 42.0, title, col(who));
+            } else {
+                var who = -1;
+                for i in 4 { if s.players[i].life == Life.Alive { who = i; } }
+                var msg: u8[>..] = [];
+                match s.match_mode {
+                    Teams2v2 => {
+                        var t0_al = 0; var t1_al = 0;
+                        for i in 4 {
+                            if s.players[i].life == Life.Alive {
+                                if team_of(i) == 0 { t0_al += 1; } else { t1_al += 1; }
+                            }
+                        }
+                        if t0_al > 0 && t1_al == 0 { msg.append("TEAM 1 WINS!"); }
+                        else if t1_al > 0 && t0_al == 0 { msg.append("TEAM 2 WINS!"); }
+                        else { msg.append("DRAW"); }
+                    },
+                    Prey => {
+                        if s.players[s.vip_slot].life == Life.Alive { msg.append("PREY SURVIVED!"); }
+                        else { msg.append("HUNTERS WIN!"); }
+                    },
+                    Predator => {
+                        if s.players[s.vip_slot].life == Life.Alive { msg.append("PREDATOR WINS!"); }
+                        else { msg.append("RUNNERS WIN!"); }
+                    },
+                    FreeForAll => {
+                        if who >= 0 && s.players[who].life != Life.Off {
+                            var nm: u8[>..] = [];
+                            player_name(s, who, nm);
+                            if s.players[who].streak >= 2 { format(msg, nm[..], " WINS! (", s.players[who].streak, "x)"); }
+                            else { format(msg, nm[..], " WINS!"); }
+                        } else { msg.append("DRAW"); }
+                    },
+                }
+                let w = ui::text_width(ui::font(big), msg);
+                ui::fill_rect(big, ui::rect(0, vh / 2.0 - 75.0, vw, 145.0), 0.0, ui::rgba(10, 12, 20, 195));
+                text(big, (vw - w) / 2.0, vh / 2.0 - 60.0, msg, if who >= 0 { col(who) } else { ui::rgb(230, 230, 235) });
+            }
         }
     }
     ui::end(big);
@@ -3697,6 +3778,26 @@ fn main() {
     let big = overlay(104.0);
     let panel = overlay(24.0);
     let menu = ui::create_from_memory(ROBOTO, 24.0);
+    let check_tex = make_check_tex();
+    {
+        var mstyle = ui::style(menu);
+        mstyle.checkbox.normal = ui::style_item_color(ui::rgb(24, 28, 38));
+        mstyle.checkbox.hover = ui::style_item_color(ui::rgb(38, 44, 60));
+        mstyle.checkbox.active = ui::style_item_color(ui::rgb(32, 38, 52));
+        mstyle.checkbox.border_color = ui::rgb(138, 152, 180);
+        mstyle.checkbox.border = 2.0;
+        mstyle.checkbox.padding = float2 { 1.0, 1.0 };
+        mstyle.checkbox.cursor_normal = ui::style_item_image(ui::texture_image(check_tex));
+        mstyle.checkbox.cursor_hover = ui::style_item_image(ui::texture_image(check_tex));
+        mstyle.option.normal = ui::style_item_color(ui::rgb(24, 28, 38));
+        mstyle.option.hover = ui::style_item_color(ui::rgb(38, 44, 60));
+        mstyle.option.active = ui::style_item_color(ui::rgb(32, 38, 52));
+        mstyle.option.border_color = ui::rgb(138, 152, 180);
+        mstyle.option.border = 2.0;
+        mstyle.option.cursor_normal = ui::style_item_color(ui::rgb(52, 204, 114));
+        mstyle.option.cursor_hover = ui::style_item_color(ui::rgb(82, 224, 138));
+        ui::set_style(menu, mstyle);
+    }
     let init_sz = gfx::screen_size();
     var sc: f32 = max(1.0, min(3.5, min((init_sz.x as f32) / 960.0, (init_sz.y as f32) / 720.0)));
     if sc != 1.0 {
@@ -3718,10 +3819,11 @@ fn main() {
     var prev_life: Life[4] = [Life.Off, Life.Off, Life.Off, Life.Off];
     var round_clip_start = 0;
     var reel_active = false;
+    var reel_wait = 0;
     var reel_idx = 0;
     var reel_end = 0;
     var reel_f = 0;
-    var reel_tick = 0;
+    var reel_acc = 0.0;
     var single_watch = false;
     var watch_clip = KillClip { .. };
     var replay_msg: u8[..80] = [];
@@ -3815,6 +3917,7 @@ fn main() {
             else {
                 reel_idx += 1;
                 reel_f = 0;
+                reel_acc = 0.0;
                 if reel_idx >= reel_end { reel_active = false; }
             }
         }
@@ -4052,7 +4155,11 @@ fn main() {
                 acc -= 1.0 / 60.0;
                 if s.over > 0 {
                     for i in 1..4 {
-                        if s.players[i].life != Life.Off && inp_max[i] >= 0 { ack[i] = inp_max[i]; }
+                        if s.players[i].life != Life.Off && inp_max[i] >= 0 {
+                            ack[i] = inp_max[i];
+                            let sl = i * 32 + (inp_max[i] & 31);
+                            s.players[i].bits = if inp_seq[sl] == inp_max[i] { inp_bits[sl] } else { 0 };
+                        }
                     }
                     tick(s, r, n);
                 } else {
@@ -4163,11 +4270,11 @@ fn main() {
                         let kc = if s.last_kill_victim == (i as u8) { s.last_kill_cause } else { CAUSE_BOMB };
                         let kk = if s.last_kill_victim == (i as u8) { s.last_kill_killer as i64 } else { -1 };
                         format_kill_label(s, i, kk, kc, active_rec.label);
-                        let start_f = max(0, ring.len - 60);
+                        let start_f = max(0, ring.len - 40);
                         for ri in start_f..ring.len {
                             if active_rec.frames.len < 90 { active_rec.frames.push(ring[ri]); }
                         }
-                        rec_post = 20;
+                        rec_post = 28;
                     }
                     prev_life[i] = s.players[i].life;
                 }
@@ -4180,23 +4287,31 @@ fn main() {
                     }
                 }
                 if prev_over_rec == 0 && s.over > 0 {
-                    if rec_post > 0 && active_rec.frames.len > 0 {
-                        if clips.len >= 32 { remove_at(clips, 0); if round_clip_start > 0 { round_clip_start -= 1; } }
-                        clips.push(active_rec);
-                        rec_post = 0;
-                    }
-                    if frames < 0 && clips.len > round_clip_start && !single_watch {
-                        reel_active = true;
-                        reel_idx = round_clip_start;
-                        reel_end = clips.len;
-                        reel_f = 0;
-                        reel_tick = 0;
+                    // Let the live explosion, audio, and black-sheep transformation play out (~1.6s) before starting the Kill Reel!
+                    reel_wait = 48;
+                }
+                if reel_wait > 0 && s.over > 0 {
+                    reel_wait -= 1;
+                    if reel_wait == 0 {
+                        if rec_post > 0 && active_rec.frames.len > 0 {
+                            if clips.len >= 32 { remove_at(clips, 0); if round_clip_start > 0 { round_clip_start -= 1; } }
+                            clips.push(active_rec);
+                            rec_post = 0;
+                        }
+                        if frames < 0 && clips.len > round_clip_start && !single_watch {
+                            reel_active = true;
+                            reel_idx = round_clip_start;
+                            reel_end = clips.len;
+                            reel_f = 0;
+                            reel_acc = 0.0;
+                        }
                     }
                 }
                 if prev_over_rec > 0 && s.over == 0 {
                     round_clip_start = clips.len;
                     ring.resize(0);
                     reel_active = false;
+                    reel_wait = 0;
                 }
                 prev_over_rec = s.over;
             }
@@ -4216,16 +4331,17 @@ fn main() {
             var rshown: float2[4] = [z, z, z, z];
             for i in 4 { rshown[i] = float2 { rs.players[i].x as f32, rs.players[i].y as f32 }; }
             var rfx = Fx { .. };
-            draw(hud, big, rs, rshown, rfx, draw_mode, sc, atlas);
+            draw(hud, big, rs, rshown, rfx, draw_mode, sc, atlas, true);
             if ui::begin(panel, "ReplayBar", ui::rect(14.0, vh - 56.0, vw - 28.0, 44.0), ui::WINDOW_NO_SCROLLBAR) {
                 var rtxt: u8[>..] = [];
-                format(rtxt, "REPLAY: ", watch_clip.label[..], "   [Space / Esc to close]");
+                format(rtxt, "REPLAY (1/2x): ", watch_clip.label[..], "   [Space / Esc to close]");
                 ui::layout_row_dynamic(panel, 32.0, 1);
                 ui::label(panel, rtxt[..], ui::TEXT_CENTERED);
             }
             ui::end(panel);
-            reel_tick += 1;
-            if reel_tick % 3 == 0 {
+            reel_acc += min(gfx::delta_time(), 0.1);
+            while reel_acc >= 1.0 / 15.0 {
+                reel_acc -= 1.0 / 15.0;
                 reel_f += 1;
                 if reel_f >= watch_clip.frames.len { reel_f = 0; }
             }
@@ -4235,25 +4351,26 @@ fn main() {
             var rshown: float2[4] = [z, z, z, z];
             for i in 4 { rshown[i] = float2 { rs.players[i].x as f32, rs.players[i].y as f32 }; }
             var rfx = Fx { .. };
-            draw(hud, big, rs, rshown, rfx, draw_mode, sc, atlas);
+            draw(hud, big, rs, rshown, rfx, draw_mode, sc, atlas, true);
             if ui::begin(panel, "ReelBar", ui::rect(14.0, vh - 56.0, vw - 28.0, 44.0), ui::WINDOW_NO_SCROLLBAR) {
                 var rtxt: u8[>..] = [];
-                format(rtxt, "KILL REPLAY ", reel_idx - round_clip_start + 1, "/", reel_end - round_clip_start, " - ", clips[reel_idx].label[..], "  [Space: Skip]");
+                format(rtxt, "KILL REPLAY (1/2x) ", reel_idx - round_clip_start + 1, "/", reel_end - round_clip_start, " - ", clips[reel_idx].label[..], "  [Space: Skip]");
                 ui::layout_row_dynamic(panel, 32.0, 1);
                 ui::label(panel, rtxt[..], ui::TEXT_CENTERED);
             }
             ui::end(panel);
-            reel_tick += 1;
-            if reel_tick % 3 == 0 {
+            reel_acc += min(gfx::delta_time(), 0.1);
+            while reel_acc >= 1.0 / 15.0 {
+                reel_acc -= 1.0 / 15.0;
                 reel_f += 1;
                 if reel_f >= clips[reel_idx].frames.len {
                     reel_idx += 1;
                     reel_f = 0;
-                    if reel_idx >= reel_end { reel_active = false; }
+                    if reel_idx >= reel_end { reel_active = false; break; }
                 }
             }
         } else {
-            draw(hud, big, s, shown, fx, draw_mode, sc, atlas);
+            draw(hud, big, s, shown, fx, draw_mode, sc, atlas, false);
         }
         if mode != GameMode.Lobby && !single_watch && !reel_active {
             let is_host_or_solo = mode != GameMode.Join;
@@ -4361,7 +4478,7 @@ fn main() {
                         watch_clip = clips[ci];
                         single_watch = true;
                         reel_f = 0;
-                        reel_tick = 0;
+                        reel_acc = 0.0;
                         replays_open = false;
                     }
                     if ui::button_label(menu, "Save") {
@@ -4392,7 +4509,7 @@ fn main() {
                                     watch_clip = lc;
                                     single_watch = true;
                                     reel_f = 0;
-                                    reel_tick = 0;
+                                    reel_acc = 0.0;
                                     replays_open = false;
                                 }
                             }
