@@ -28,10 +28,11 @@ let BOMB = 16;
 let HOLD = 32;               // stand your ground: you can't move, and others can't walk through you
 let MINE_KEY = 64;           // E / X drops a proximity mine (Shift+Space also works)
 let BUILD_KEY = 128;         // Q places a 2-hit reinforced block ahead; Shift+Q places a 2-hit chain-link fence on the tile edge
-let FIRE_KEY = 256;          // F fires active weapon (flamethrower / fireball)
+let FIRE_KEY = 256;          // F fires Fireball Thrower
 let SLIDE = 5;               // ticks a kicked bomb takes per tile
 let GHOST = 600;             // ghost power-up length in ticks
 let NAPALM = 480;            // napalm trail length in ticks
+let FLAMER = 480;            // carried flamethrower length in ticks (always blazing ahead!)
 let DRUNK = 900;             // drunk jitter length in ticks
 let BOMB_UNKICK: u8 = 1;
 let BOMB_WARPED: u8 = 2;
@@ -190,7 +191,7 @@ fn pick_power(mask: u32, r: rng&) -> u8 {
 }
 
 let ROBOTO: const u8[:] = embed_file("Roboto-Regular.ttf");
-struct Player { x: i64, y: i64, life: Life, facing: Dir, portal_cd: u8, bombs: u8, range: u8, speed: u8, slow: u8, wins: u8, streak: u8, kills: u8, suicides: u8, sheep_deaths: u8, deaths: u8, bits: u16, held: u8, mine_held: u8, build_held: u8, fire_held: u8, placed: u8, ghost: u16, napalm: u16, drunk: u16, kick: u8, unkick: u8, mines: u8, missiles: u8, builds: u8, dir_bombs: u8, flamer: u8, fireballs: u8, kind: Character, name: u8[..12] }
+struct Player { x: i64, y: i64, life: Life, facing: Dir, portal_cd: u8, bombs: u8, range: u8, speed: u8, slow: u8, wins: u8, streak: u8, kills: u8, suicides: u8, sheep_deaths: u8, deaths: u8, bits: u16, held: u8, mine_held: u8, build_held: u8, fire_held: u8, placed: u8, ghost: u16, napalm: u16, drunk: u16, kick: u8, unkick: u8, mines: u8, missiles: u8, builds: u8, dir_bombs: u8, flamer: u16, fireballs: u8, kind: Character, name: u8[..12] }
 // dir: None when still, otherwise slides; m: ticks since its last step; flags: bit 0 = unkickable, bit 1 = warped; fire_lvl: 1..15 flame linger; blast_dir: None for 4-way, else single-direction blast.
 struct Bomb { x: u8, y: u8, t: u16, range: u8, owner: u8, dir: Dir, m: u8, flags: u8, fire_lvl: u8, blast_dir: Dir }
 // Proximity mine: arms down to 0, then explodes when stepped on or blasted.
@@ -665,6 +666,7 @@ fn step_player(s: State&, i: i64) {
     if s.players[i].ghost > 0 { s.players[i].ghost -= 1; }
     if s.players[i].napalm > 0 { s.players[i].napalm -= 1; }
     if s.players[i].drunk > 0 { s.players[i].drunk -= 1; }
+    if s.players[i].flamer > 0 { s.players[i].flamer -= 1; }
     if s.players[i].portal_cd > 0 { s.players[i].portal_cd -= 1; }
     // While guiding a heat-seeker missile, the player stands stationary wearing a headset.
     if s.missiles[i].active != 0 {
@@ -767,7 +769,7 @@ fn step_player(s: State&, i: i64) {
             s.players[i].missiles += 1;
             s.players[i].builds += 2;
             s.players[i].dir_bombs += 1;
-            s.players[i].flamer += 2;
+            s.players[i].flamer = max(s.players[i].flamer as i64, 300) as u16;
             s.players[i].fireballs += 1;
         }
         else if g == 14 {          // Bad/Curse: longer fire, but slows you down!
@@ -777,24 +779,19 @@ fn step_player(s: State&, i: i64) {
         else if g == 15 { s.players[i].unkick = 1; }
         else if g == TILE_PWR_BUILD { s.players[i].builds += 3; }
         else if g == TILE_PWR_DIRBOMB { s.players[i].dir_bombs += 3; }
-        else if g == TILE_PWR_FLAMER { s.players[i].flamer += 4; }
+        else if g == TILE_PWR_FLAMER { s.players[i].flamer = min(900, (s.players[i].flamer as i64) + FLAMER) as u16; }
         else if g == TILE_PWR_FIREBALL { s.players[i].fireballs += 3; }
         s.grid[ty * W + tx] = 0;
     }
     let p = s.players[i];
-    // F fires active weapon: Fireball Thrower (fast projectile) or Flamethrower (3-tile flame jet ahead).
+    // F fires Fireball Thrower (fast projectile); Flamethrower blazes continuously ahead while carried!
     let want_fire = (bits & FIRE_KEY) != 0;
-    if want_fire && p.fire_held == 0 {
+    if want_fire && p.fire_held == 0 && p.fireballs > 0 && s.fireballs.len < 8 {
         let fdir = if p.facing == Dir.None { Dir.Down } else { p.facing };
-        if p.fireballs > 0 && s.fireballs.len < 8 {
-            let sx = s.players[i].x + dir_dx(fdir) * (TILE / 2);
-            let sy = s.players[i].y + dir_dy(fdir) * (TILE / 2);
-            s.fireballs.push(Fireball { sx as i32, sy as i32, fdir, i as u8, 0, 120 });
-            s.players[i].fireballs -= 1;
-        } else if p.flamer > 0 {
-            explode_arm(s, tx, ty, dir_dx(fdir), dir_dy(fdir), 3, 10, i);
-            s.players[i].flamer -= 1;
-        }
+        let sx = s.players[i].x + dir_dx(fdir) * (TILE / 2);
+        let sy = s.players[i].y + dir_dy(fdir) * (TILE / 2);
+        s.fireballs.push(Fireball { sx as i32, sy as i32, fdir, i as u8, 0, 120 });
+        s.players[i].fireballs -= 1;
     }
     s.players[i].fire_held = if want_fire { 1 } else { 0 };
     // Q places a 2-hit reinforced block ahead; Shift+Q places a 2-hit chain-link fence ahead (1st hit damages, 2nd destroys).
@@ -939,6 +936,29 @@ fn step_dead(s: State&, i: i64) {
             }
         }
     }
+}
+
+// Returns true if player `owner`'s continuous carried flamethrower jet reaches tile (target_tx, target_ty).
+fn flamer_hits_tile(s: State&, owner: i64, target_tx: i64, target_ty: i64) -> bool {
+    let p = s.players[owner];
+    if p.life != Life.Alive || p.flamer == 0 { return false; }
+    let tx = p.x / TILE;
+    let ty = p.y / TILE;
+    let fdir = if p.facing == Dir.None { Dir.Down } else { p.facing };
+    let dx = dir_dx(fdir);
+    let dy = dir_dy(fdir);
+    for k in 1..4 {
+        let px = tx + dx * (k - 1);
+        let py = ty + dy * (k - 1);
+        let ntx = tx + dx * k;
+        let nty = ty + dy * k;
+        if ntx < 0 || ntx >= W || nty < 0 || nty >= H { break; }
+        if fence_between(s, px, py, ntx, nty) { break; }
+        let g = s.grid[nty * W + ntx];
+        if g == 1 || g == 2 || g == 6 || g == 7 || g == TILE_STEEL_DMG { break; }
+        if ntx == target_tx && nty == target_ty { return true; }
+    }
+    return false;
 }
 
 // One 60 Hz step: move, burn, age flames, kill, and decide when a round ends.
@@ -1221,6 +1241,55 @@ fn tick(s: State&, r: rng&, n: i64) {
             }
         }
     }
+    // Carried Flamethrower: always blazing 3 tiles ahead of the player so you can walk forward freely without self-burning!
+    for i in 4 {
+        let p = s.players[i];
+        guard p.life == Life.Alive && p.flamer > 0 else { continue; }
+        let tx = p.x / TILE;
+        let ty = p.y / TILE;
+        let fdir = if p.facing == Dir.None { Dir.Down } else { p.facing };
+        let dx = dir_dx(fdir);
+        let dy = dir_dy(fdir);
+        for k in 1..4 {
+            let px = tx + dx * (k - 1);
+            let py = ty + dy * (k - 1);
+            let ntx = tx + dx * k;
+            let nty = ty + dy * k;
+            if ntx < 0 || ntx >= W || nty < 0 || nty >= H { break; }
+            if fence_between(s, px, py, ntx, nty) {
+                if n % 18 == 0 { fence_hit_between(s, px, py, ntx, nty); }
+                break;
+            }
+            let gi = nty * W + ntx;
+            let g = s.grid[gi];
+            if g == 1 { break; }
+            if g == TILE_BRUSH { s.grid[gi] = 0; }
+            else if g == 6 {
+                if n % 18 == 0 { s.grid[gi] = TILE_STEEL_DMG; }
+                break;
+            } else if g == 2 || g == 7 || g == TILE_STEEL_DMG {
+                if n % 18 == 0 {
+                    if g == 7 { s.grid[gi] = pick_power(s.power_mask, r); }
+                    else if r.rand_int(100) < (s.drops as i64) { s.grid[gi] = pick_power(s.power_mask, r); }
+                    else { s.grid[gi] = 0; }
+                }
+                break;
+            }
+            let bo = bomb_at(s, ntx, nty);
+            if bo >= 0 { s.bombs[bo].t = 0; }
+            let mo = mine_at(s, ntx, nty);
+            if mo >= 0 && s.mines[mo].arm == 0 {
+                let mw = s.mines[mo].owner as i64;
+                remove_at(s.mines, mo);
+                explode_at(s, ntx, nty, 2, 16, mw);
+            }
+            for sk in 2 {
+                if s.sheep[sk].alive != 0 && s.sheep[sk].x / TILE == ntx && s.sheep[sk].y / TILE == nty {
+                    if s.sheep[sk].on_fire == 0 { s.sheep[sk].on_fire = 360; s.sheep[sk].t = 0; }
+                }
+            }
+        }
+    }
     for k in 2 {
         if s.sheep[k].alive != 0 && is_flame(s.grid[(s.sheep[k].y / TILE) * W + s.sheep[k].x / TILE]) {
             if s.sheep[k].on_fire == 0 { s.sheep[k].on_fire = 360; s.sheep[k].t = 0; }
@@ -1237,11 +1306,25 @@ fn tick(s: State&, r: rng&, n: i64) {
         guard s.players[i].life != Life.Off else { continue; }
         joined += 1;
         if s.players[i].life == Life.Alive {
-            let ti = (s.players[i].y / TILE) * W + s.players[i].x / TILE;
+            let my_tx = s.players[i].x / TILE;
+            let my_ty = s.players[i].y / TILE;
+            let ti = my_ty * W + my_tx;
             var burned = is_flame(s.grid[ti]);
-            let fo = fowner_get(s, ti);
+            var fo = fowner_get(s, ti);
             if burned && s.match_mode == MatchMode.Teams2v2 && s.friendly_fire == 0 {
                 if fo < 4 && fo != i && team_of(fo) == team_of(i) { burned = false; }
+            }
+            // Check if hit by ANOTHER player's carried flamethrower (never self-burns!)
+            if !burned {
+                for j in 4 {
+                    if j == i { continue; }
+                    if s.match_mode == MatchMode.Teams2v2 && s.friendly_fire == 0 && team_of(j) == team_of(i) { continue; }
+                    if flamer_hits_tile(s, j, my_tx, my_ty) {
+                        burned = true;
+                        fo = j;
+                        break;
+                    }
+                }
             }
             var by_sheep = false;
             for k in 2 {
@@ -1863,9 +1946,9 @@ fn hear(prev: State&, s: State&, sfx: Sfx, fx: Fx&) {
         let vol = if i == s.you { 0.8 } else { 0.4 };
         if a.life == Life.Alive && b.life != Life.Alive { audio::play(sfx.die, 0.8, pan(b.x), 1.0, false); }
         if abs(b.x - a.x) + abs(b.y - a.y) > TILE * 2 { audio::play(sfx.warp, vol, pan(b.x), 1.0, false); }
-        let got_pwr = b.range + b.bombs + b.speed + b.mines + b.missiles + b.builds + b.dir_bombs + b.flamer + b.fireballs > a.range + a.bombs + a.speed + a.mines + a.missiles + a.builds + a.dir_bombs + a.flamer + a.fireballs ||
+        let got_pwr = b.range + b.bombs + b.speed + b.mines + b.missiles + b.builds + b.dir_bombs + b.fireballs > a.range + a.bombs + a.speed + a.mines + a.missiles + a.builds + a.dir_bombs + a.fireballs ||
                       (a.ghost == 0 && b.ghost > 0) || (a.kick == 0 && b.kick > 0) || (a.unkick == 0 && b.unkick > 0) ||
-                      (a.napalm == 0 && b.napalm > 0) || (a.drunk == 0 && b.drunk > 0);
+                      (a.napalm == 0 && b.napalm > 0) || (b.flamer > a.flamer) || (a.drunk == 0 && b.drunk > 0);
         if got_pwr { audio::play(sfx.pickup, vol, pan(b.x), if b.slow > a.slow { 0.65 } else { 1.0 }, false); }
         if b.wins > a.wins && s.over == 0 { audio::play(sfx.win, 0.8, 0.0, 1.0, false); }
     }
@@ -3251,6 +3334,51 @@ fn draw_fog(c: ui::Context, g: u8, x: f32, y: f32, t: f32, tm: f32, viewer_ghost
     ui::fill_circle(c, ui::rect(x + t * 0.72 - r * 0.55 + drift * 0.6, y + t * 0.68 - r * 0.55, r * 1.1, r * 1.1), ui::rgba(164, 178, 198, a));
 }
 
+// Roaring continuous flamethrower nozzle & cone always projecting ahead of player i while carried.
+fn draw_flamer(c: ui::Context, s: State&, i: i64, pos: float2, ox: f32, oy: f32, t: f32, tm: f32) {
+    let p = s.players[i];
+    if p.life != Life.Alive || p.flamer == 0 { return; }
+    let tx = p.x / TILE;
+    let ty = p.y / TILE;
+    let fdir = if p.facing == Dir.None { Dir.Down } else { p.facing };
+    let dx = dir_dx(fdir);
+    let dy = dir_dy(fdir);
+    let fdx = dx as f32;
+    let fdy = dy as f32;
+    var reach: f32 = 0.35;
+    for k in 1..4 {
+        let px = tx + dx * (k - 1);
+        let py = ty + dy * (k - 1);
+        let ntx = tx + dx * k;
+        let nty = ty + dy * k;
+        if ntx < 0 || ntx >= W || nty < 0 || nty >= H { break; }
+        if fence_between(s, px, py, ntx, nty) { reach = (k as f32) - 0.32; break; }
+        let g = s.grid[nty * W + ntx];
+        if g == 1 || g == 2 || g == 6 || g == 7 || g == TILE_STEEL_DMG { reach = (k as f32) - 0.22; break; }
+        reach = (k as f32) + 0.15;
+    }
+    let sx = ox + pos.x / TILE * t + fdx * t * 0.28;
+    let sy = oy + pos.y / TILE * t + fdy * t * 0.28;
+    // Steel flamethrower nozzle pointing ahead
+    ui::stroke_line(c, sx - fdx * t * 0.16, sy - fdy * t * 0.16, sx + fdx * t * 0.14, sy + fdy * t * 0.14, max(4.0, t * 0.14), ui::rgb(72, 82, 98));
+    ui::fill_circle(c, ui::rect(sx + fdx * t * 0.12 - t * 0.08, sy + fdy * t * 0.12 - t * 0.08, t * 0.16, t * 0.16), ui::rgb(255, 195, 70));
+    let len = reach * t;
+    let perp_x = -fdy;
+    let perp_y = fdx;
+    let steps = 9;
+    for k in steps {
+        let u = ((k as f32) + 0.3) / (steps as f32);
+        let wob = sin(tm * 26.0 - u * 7.0 + (i as f32) * 1.7) * t * (0.04 + 0.12 * u);
+        let bx = sx + fdx * (t * 0.14 + len * u) + perp_x * wob;
+        let by = sy + fdy * (t * 0.14 + len * u) + perp_y * wob;
+        let rad = t * (0.14 + 0.24 * u) * (0.88 + 0.16 * sin(tm * 32.0 + (k as f32) * 1.3));
+        ui::fill_circle(c, ui::rect(bx - rad * 1.35, by - rad * 1.35, rad * 2.7, rad * 2.7), ui::rgba(255, 92, 20, (75.0 * (1.1 - u * 0.5)) as i64));
+        ui::fill_circle(c, ui::rect(bx - rad, by - rad, rad * 2.0, rad * 2.0), ui::rgba(255, (125.0 + 75.0 * (1.0 - u)) as i64, 24, (225.0 * (1.05 - u * 0.35)) as i64));
+        let cr = rad * (0.62 - 0.18 * u);
+        ui::fill_circle(c, ui::rect(bx - cr, by - cr, cr * 2.0, cr * 2.0), ui::rgba(255, 242, (165.0 - 90.0 * u) as i64, 235));
+    }
+}
+
 fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&, mode: const u8[:], sc: f32, atlas: gfx::Texture, replay_age: f32) {
     let is_replay = replay_age >= 0.0;
     let detailed_tex = s.detailed_tex != 0;
@@ -3341,6 +3469,11 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
             if s.missiles[i].active != 0 { draw_missile(hud, s.missiles[i], i, ox, oy, t, tm); }
         }
         for fb in s.fireballs { draw_fireball(hud, fb, ox, oy, t, tm); }
+        for i in 4 {
+            if s.players[i].life == Life.Alive && s.players[i].flamer > 0 {
+                draw_flamer(hud, s, i, shown[i], ox, oy, t, tm);
+            }
+        }
         // Fog clouds drawn OVER the arena so Fog Ghosts genuinely obscure vision!
         let viewer_ghost = s.players[s.you].life == Life.FogGhost;
         for ty in H {
@@ -3374,6 +3507,11 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
                     }
                 }
                 for fb in s.fireballs { draw_fireball(hud, fb, ox, oy, t, tm); }
+                for i in 4 {
+                    if s.players[i].life == Life.Alive && s.players[i].flamer > 0 {
+                        draw_flamer(hud, s, i, shown[i], ox, oy, t, tm);
+                    }
+                }
                 for k in 2 {
                     if s.sheep[k].alive != 0 && s.sheep[k].on_fire > 0 {
                         let sx = ox + (s.sheep[k].x as f32) / TILE * t;
@@ -3423,7 +3561,7 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
                 if me.builds > 0 { format(st, "Build x", me.builds, " [Q=Block, Shift+Q=Fence]  "); }
                 if me.dir_bombs > 0 { format(st, "DirBomb x", me.dir_bombs, " [Space]  "); }
                 if me.fireballs > 0 { format(st, "Fireball x", me.fireballs, " [F]  "); }
-                else if me.flamer > 0 { format(st, "Flamethrower x", me.flamer, " [F]  "); }
+                if me.flamer > 0 { format(st, "FLAMETHROWER ", (me.flamer as i64 + 59) / 60, "s  "); }
                 if me.napalm > 0 { st.append("NAPALM  "); }
                 if me.drunk > 0 { st.append("DRUNK!  "); }
                 if me.unkick != 0 { st.append("AnchorBombs  "); }
@@ -4990,7 +5128,7 @@ fn main() {
                 ui::checkbox_label(menu, "Builder Kit (Q/Shift+Q)", p11);
                 ui::layout_row_dynamic(menu, 30.0, 2);
                 ui::checkbox_label(menu, "Directional Bombs", p12);
-                ui::checkbox_label(menu, "Flamethrower (F)", p13);
+                ui::checkbox_label(menu, "Flamethrower", p13);
                 ui::layout_row_dynamic(menu, 30.0, 2);
                 ui::checkbox_label(menu, "Fireball Thrower (F)", p14);
                 var p_on = s.portals_on != 0;
