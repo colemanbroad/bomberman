@@ -33,6 +33,7 @@ let SLIDE = 5;               // ticks a kicked bomb takes per tile
 let GHOST = 600;             // ghost power-up length in ticks
 let NAPALM = 480;            // napalm trail length in ticks
 let FLAMER = 480;            // carried flamethrower length in ticks (always blazing ahead!)
+let FORCEFIELD = 360;        // 360-degree forcefield invulnerability length in ticks (6s)
 let DRUNK = 900;             // drunk jitter length in ticks
 let BOMB_UNKICK: u8 = 1;
 let BOMB_WARPED: u8 = 2;
@@ -40,7 +41,7 @@ let CAUSE_NONE: u8 = 0;
 let CAUSE_BOMB: u8 = 1;
 let CAUSE_SUICIDE: u8 = 2;
 let CAUSE_SHEEP: u8 = 3;
-let PROTO_VER: i64 = 14;
+let PROTO_VER: i64 = 15;
 
 enum Character { Goose, Squirrel, Baby, Cow, Pig, Farmer }
 enum Map { Island, Forest, Mountains, Desert, Sandbox }
@@ -144,6 +145,8 @@ let TILE_PWR_BUILD: u8 = 130;
 let TILE_PWR_DIRBOMB: u8 = 131;
 let TILE_PWR_FLAMER: u8 = 132;
 let TILE_PWR_FIREBALL: u8 = 133;
+let TILE_PWR_SHIELD: u8 = 134;
+let TILE_PWR_FORCEFIELD: u8 = 135;
 let TILE_STEEL_DMG: u8 = 136;
 
 let PWR_FLAME: u32 = 1;
@@ -161,10 +164,12 @@ let PWR_BUILD: u32 = 2048;
 let PWR_DIRBOMB: u32 = 4096;
 let PWR_FLAMER: u32 = 8192;
 let PWR_FIREBALL: u32 = 16384;
+let PWR_SHIELD: u32 = 32768;
+let PWR_FORCEFIELD: u32 = 65536;
 let PWR_CLASSIC: u32 = 31;
-let PWR_ALL: u32 = 32767;
+let PWR_ALL: u32 = 131071;
 
-fn is_power(g: u8) -> bool { (g >= 3 && g <= 5) || (g >= 8 && g <= 15) || (g >= 130 && g <= 133) }
+fn is_power(g: u8) -> bool { (g >= 3 && g <= 5) || (g >= 8 && g <= 15) || (g >= 130 && g <= 135) }
 fn is_flame(g: u8) -> bool { g >= 16 && g < 96 }
 fn is_fog(g: u8) -> bool { g >= 96 && g < 128 }
 fn is_solid(g: u8) -> bool { g == 1 || g == 2 || g == 6 || g == 7 || g == TILE_GRATE || g == TILE_STEEL_DMG }
@@ -187,12 +192,14 @@ fn pick_power(mask: u32, r: rng&) -> u8 {
     if (mask & PWR_DIRBOMB) != 0 { opts.push(TILE_PWR_DIRBOMB); }
     if (mask & PWR_FLAMER) != 0 { opts.push(TILE_PWR_FLAMER); }
     if (mask & PWR_FIREBALL) != 0 { opts.push(TILE_PWR_FIREBALL); }
+    if (mask & PWR_SHIELD) != 0 { opts.push(TILE_PWR_SHIELD); }
+    if (mask & PWR_FORCEFIELD) != 0 { opts.push(TILE_PWR_FORCEFIELD); }
     if opts.len == 0 { return 0; }
     return opts[r.rand_int(opts.len)];
 }
 
 let ROBOTO: const u8[:] = embed_file("Roboto-Regular.ttf");
-struct Player { x: i64, y: i64, life: Life, facing: Dir, portal_cd: u8, bombs: u8, range: u8, speed: u8, slow: u8, wins: u8, streak: u8, kills: u8, suicides: u8, sheep_deaths: u8, deaths: u8, bits: u16, held: u8, mine_held: u8, build_held: u8, fire_held: u8, placed: u8, ghost: u16, napalm: u16, drunk: u16, kick: u8, unkick: u8, mines: u8, missiles: u8, builds: u8, dir_bombs: u8, flamer: u16, fireballs: u8, kind: Character, name: u8[..12] }
+struct Player { x: i64, y: i64, life: Life, facing: Dir, portal_cd: u8, bombs: u8, range: u8, speed: u8, slow: u8, wins: u8, streak: u8, kills: u8, suicides: u8, sheep_deaths: u8, deaths: u8, bits: u16, held: u8, mine_held: u8, build_held: u8, fire_held: u8, placed: u8, ghost: u16, napalm: u16, drunk: u16, kick: u8, unkick: u8, mines: u8, missiles: u8, builds: u8, dir_bombs: u8, flamer: u16, fireballs: u8, shield: u8, shield_cd: u8, forcefield: u16, kind: Character, name: u8[..12] }
 // dir: None when still, otherwise slides; m: ticks since its last step; flags: bit 0 = unkickable, bit 1 = warped; fire_lvl: 1..15 flame linger; blast_dir: None for 4-way, else single-direction blast.
 struct Bomb { x: u8, y: u8, t: u16, range: u8, owner: u8, dir: Dir, m: u8, flags: u8, fire_lvl: u8, blast_dir: Dir }
 // Proximity mine: arms down to 0, then explodes when stepped on or blasted.
@@ -428,14 +435,17 @@ fn reset_round(s: State&, r: rng&) {
         s.grid[1 * W + 9] = 11;                // Napalm Fire Trail
         s.grid[1 * W + 10] = 12;               // Proximity Mines
         s.grid[1 * W + 11] = 15;               // Unkickable Bombs
-        // Upper gallery (ty = 3): Builder Kit, Directional Bombs, Flamethrower, Fireball, plus Drunk & Curse off to the right
-        s.grid[3 * W + 4] = TILE_PWR_BUILD;    // Builder Kit (Q=Block, Shift+Q=Fence)
-        s.grid[3 * W + 5] = TILE_PWR_DIRBOMB;  // Directional Bombs
-        s.grid[3 * W + 6] = TILE_PWR_FLAMER;   // Flamethrower (F)
-        s.grid[3 * W + 7] = TILE_PWR_FIREBALL; // Fireball Thrower (F)
-        s.grid[3 * W + 9] = 13;                // Drunk
-        s.grid[3 * W + 10] = 14;               // Bad / Curse
+        // Upper gallery (ty = 3): Builder Kit, Directional Bombs, Flamethrower, Fireball, Shield, Forcefield, plus Drunk & Curse
+        s.grid[3 * W + 3] = TILE_PWR_BUILD;      // Builder Kit (Q=Block, Shift+Q=Fence)
+        s.grid[3 * W + 4] = TILE_PWR_DIRBOMB;    // Directional Bombs
+        s.grid[3 * W + 5] = TILE_PWR_FLAMER;     // Flamethrower (continuous ahead)
+        s.grid[3 * W + 6] = TILE_PWR_FIREBALL;   // Fireball Thrower (F)
+        s.grid[3 * W + 7] = TILE_PWR_SHIELD;     // Shield (directional block, 3 hits)
+        s.grid[3 * W + 8] = TILE_PWR_FORCEFIELD; // Forcefield (360-deg timed immunity)
+        s.grid[3 * W + 10] = 13;                 // Drunk
+        s.grid[3 * W + 11] = 14;                 // Bad / Curse
         // Bottom row (ty = 11): extra copies of core & weapon power-ups for P3/P4 or quick refills
+        s.grid[11 * W + 3] = TILE_PWR_SHIELD;
         s.grid[11 * W + 4] = 3;
         s.grid[11 * W + 5] = 4;
         s.grid[11 * W + 6] = 5;
@@ -443,6 +453,7 @@ fn reset_round(s: State&, r: rng&) {
         s.grid[11 * W + 8] = TILE_PWR_FLAMER;
         s.grid[11 * W + 9] = TILE_PWR_FIREBALL;
         s.grid[11 * W + 10] = TILE_PWR_DIRBOMB;
+        s.grid[11 * W + 11] = TILE_PWR_FORCEFIELD;
         // Center showcase (ty = 5..9): Bricks, Grates, Steel Crates, Damaged Steel Crate, Gift Crates, Brush, and Fences
         s.grid[5 * W + 3] = 2;                 // Brick
         s.grid[5 * W + 5] = 2;                 // Brick
@@ -531,6 +542,9 @@ fn reset_round(s: State&, r: rng&) {
         s.players[i].dir_bombs = 0;
         s.players[i].flamer = 0;
         s.players[i].fireballs = 0;
+        s.players[i].shield = 0;
+        s.players[i].shield_cd = 0;
+        s.players[i].forcefield = 0;
     }
     for k in 2 {
         let tx = if s.map == Map.Sandbox { (if k == 0 { 6 } else { 8 }) } else { (if k == 0 { 5 } else { W - 6 }) };
@@ -597,6 +611,22 @@ fn explode_arm(s: State&, bx: i64, by: i64, dx: i64, dy: i64, rng: i64, fire_lvl
         let g = s.grid[ty * W + tx];
         if g == 1 { break; }
         if g == TILE_GRATE { continue; } // semi-permeable: flames pass straight through
+        // Directional Shield: an alive player on (tx, ty) facing directly into the blast wave blocks it (1 hit)!
+        var shielded = false;
+        for pi in 4 {
+            let pl = s.players[pi];
+            if pl.life == Life.Alive && pl.forcefield == 0 && (pl.shield > 0 || pl.shield_cd > 0) && pl.x / TILE == tx && pl.y / TILE == ty {
+                let fdir = if pl.facing == Dir.None { Dir.Down } else { pl.facing };
+                if dir_dx(fdir) == -dx && dir_dy(fdir) == -dy {
+                    if pl.shield_cd == 0 && pl.shield > 0 {
+                        s.players[pi].shield -= 1;
+                        s.players[pi].shield_cd = 28;
+                    }
+                    shielded = true;
+                }
+            }
+        }
+        if shielded { break; }
         flame(s, ty * W + tx, fire_lvl, owner);
         if g == 2 || g == 6 || g == 7 || g == TILE_STEEL_DMG { break; }
         let o = bomb_at(s, tx, ty);
@@ -668,6 +698,8 @@ fn step_player(s: State&, i: i64) {
     if s.players[i].napalm > 0 { s.players[i].napalm -= 1; }
     if s.players[i].drunk > 0 { s.players[i].drunk -= 1; }
     if s.players[i].flamer > 0 { s.players[i].flamer -= 1; }
+    if s.players[i].shield_cd > 0 { s.players[i].shield_cd -= 1; }
+    if s.players[i].forcefield > 0 { s.players[i].forcefield -= 1; }
     if s.players[i].portal_cd > 0 { s.players[i].portal_cd -= 1; }
     // While guiding a heat-seeker missile, the player stands stationary wearing a headset.
     if s.missiles[i].active != 0 {
@@ -772,6 +804,8 @@ fn step_player(s: State&, i: i64) {
             s.players[i].dir_bombs += 1;
             s.players[i].flamer = max(s.players[i].flamer as i64, 300) as u16;
             s.players[i].fireballs += 1;
+            s.players[i].shield = max(s.players[i].shield as i64, 2) as u8;
+            s.players[i].forcefield = max(s.players[i].forcefield as i64, 240) as u16;
         }
         else if g == 14 {          // Bad/Curse: longer fire, but slows you down!
             s.players[i].range += 2;
@@ -782,6 +816,8 @@ fn step_player(s: State&, i: i64) {
         else if g == TILE_PWR_DIRBOMB { s.players[i].dir_bombs += 3; }
         else if g == TILE_PWR_FLAMER { s.players[i].flamer = min(900, (s.players[i].flamer as i64) + FLAMER) as u16; }
         else if g == TILE_PWR_FIREBALL { s.players[i].fireballs += 3; }
+        else if g == TILE_PWR_SHIELD { s.players[i].shield = min(6, (s.players[i].shield as i64) + 3) as u8; }
+        else if g == TILE_PWR_FORCEFIELD { s.players[i].forcefield = min(600, (s.players[i].forcefield as i64) + FORCEFIELD) as u16; }
         s.grid[ty * W + tx] = 0;
     }
     let p = s.players[i];
@@ -1137,8 +1173,27 @@ fn tick(s: State&, r: rng&, n: i64) {
             }
             s.missiles[i].x = nx as i32;
             s.missiles[i].y = ny as i32;
+            var missile_blocked = false;
             for j in 4 {
-                if j != i && s.players[j].life == Life.Alive && abs(s.players[j].x - nx) < HB + 12 && abs(s.players[j].y - ny) < HB + 12 { boom = true; }
+                if j != i && s.players[j].life == Life.Alive && abs(s.players[j].x - nx) < HB + 12 && abs(s.players[j].y - ny) < HB + 12 {
+                    let fdir = if s.players[j].facing == Dir.None { Dir.Down } else { s.players[j].facing };
+                    let facing_m = dir_dx(fdir) == -dir_dx(d) && dir_dy(fdir) == -dir_dy(d);
+                    if s.players[j].forcefield > 0 {
+                        missile_blocked = true;
+                    } else if facing_m && (s.players[j].shield > 0 || s.players[j].shield_cd > 0) {
+                        if s.players[j].shield_cd == 0 && s.players[j].shield > 0 {
+                            s.players[j].shield -= 1;
+                            s.players[j].shield_cd = 28;
+                        }
+                        missile_blocked = true;
+                    } else {
+                        boom = true;
+                    }
+                }
+            }
+            if missile_blocked {
+                s.missiles[i].active = 0;
+                continue;
             }
             for k in 2 {
                 if s.sheep[k].alive != 0 && abs(s.sheep[k].x - nx) < HB + 12 && abs(s.sheep[k].y - ny) < HB + 12 { boom = true; }
@@ -1179,11 +1234,32 @@ fn tick(s: State&, r: rng&, n: i64) {
             s.fireballs[fi].x = nx as i32;
             s.fireballs[fi].y = ny as i32;
             s.fireballs[fi].life -= 1;
+            var blocked_by_shield = false;
             for j in 4 {
-                if j != (fb.owner as i64) && s.players[j].life == Life.Alive && abs(s.players[j].x - nx) < HB + 10 && abs(s.players[j].y - ny) < HB + 10 { hit = true; }
+                if j != (fb.owner as i64) && s.players[j].life == Life.Alive && abs(s.players[j].x - nx) < HB + 10 && abs(s.players[j].y - ny) < HB + 10 {
+                    let fdir = if s.players[j].facing == Dir.None { Dir.Down } else { s.players[j].facing };
+                    let facing_fb = dir_dx(fdir) == -dir_dx(fb.dir) && dir_dy(fdir) == -dir_dy(fb.dir);
+                    if s.players[j].forcefield > 0 {
+                        blocked_by_shield = true;
+                        hit = true;
+                    } else if facing_fb && (s.players[j].shield > 0 || s.players[j].shield_cd > 0) {
+                        if s.players[j].shield_cd == 0 && s.players[j].shield > 0 {
+                            s.players[j].shield -= 1;
+                            s.players[j].shield_cd = 28;
+                        }
+                        blocked_by_shield = true;
+                        hit = true;
+                    } else {
+                        hit = true;
+                    }
+                }
             }
             for k in 2 {
-                if s.sheep[k].alive != 0 && abs(s.sheep[k].x - nx) < HB + 10 && abs(s.sheep[k].y - ny) < HB + 10 { hit = true; }
+                if !hit && s.sheep[k].alive != 0 && abs(s.sheep[k].x - nx) < HB + 10 && abs(s.sheep[k].y - ny) < HB + 10 { hit = true; }
+            }
+            if blocked_by_shield {
+                remove_at(s.fireballs, fi);
+                continue;
             }
         }
         if hit {
@@ -1349,18 +1425,33 @@ fn tick(s: State&, r: rng&, n: i64) {
         if s.players[i].life == Life.Alive {
             let my_tx = s.players[i].x / TILE;
             let my_ty = s.players[i].y / TILE;
+            let my_fdir = if s.players[i].facing == Dir.None { Dir.Down } else { s.players[i].facing };
+            let my_fdx = dir_dx(my_fdir);
+            let my_fdy = dir_dy(my_fdir);
             let ti = my_ty * W + my_tx;
             var burned = is_flame(s.grid[ti]);
             var fo = fowner_get(s, ti);
             if burned && s.match_mode == MatchMode.Teams2v2 && s.friendly_fire == 0 {
                 if fo < 4 && fo != i && team_of(fo) == team_of(i) { burned = false; }
             }
+            if burned && s.players[i].shield_cd > 0 { burned = false; }
             // Check if hit by ANOTHER player's carried flamethrower (never self-burns!)
             if !burned {
                 for j in 4 {
                     if j == i { continue; }
                     if s.match_mode == MatchMode.Teams2v2 && s.friendly_fire == 0 && team_of(j) == team_of(i) { continue; }
                     if flamer_hits_tile(s, j, my_tx, my_ty) {
+                        let jfdir = if s.players[j].facing == Dir.None { Dir.Down } else { s.players[j].facing };
+                        let facing_flamer = my_fdx == -dir_dx(jfdir) && my_fdy == -dir_dy(jfdir);
+                        if s.players[i].forcefield > 0 {
+                            break;
+                        } else if facing_flamer && (s.players[i].shield > 0 || s.players[i].shield_cd > 0) {
+                            if s.players[i].shield_cd == 0 && s.players[i].shield > 0 {
+                                s.players[i].shield -= 1;
+                                s.players[i].shield_cd = 32;
+                            }
+                            break;
+                        }
                         burned = true;
                         fo = j;
                         break;
@@ -1370,10 +1461,23 @@ fn tick(s: State&, r: rng&, n: i64) {
             var by_sheep = false;
             for k in 2 {
                 if s.sheep[k].alive != 0 && s.sheep[k].on_fire > 0 && hits(s.players[i].x, s.players[i].y, s.sheep[k].x, s.sheep[k].y) {
-                    burned = true;
-                    by_sheep = true;
+                    let s_in_front = (s.sheep[k].x - s.players[i].x) * my_fdx + (s.sheep[k].y - s.players[i].y) * my_fdy > 0;
+                    if s.players[i].forcefield > 0 {
+                        s.sheep[k].t = 0;
+                    } else if s_in_front && (s.players[i].shield > 0 || s.players[i].shield_cd > 0) {
+                        if s.players[i].shield_cd == 0 && s.players[i].shield > 0 {
+                            s.players[i].shield -= 1;
+                            s.players[i].shield_cd = 32;
+                        }
+                        s.sheep[k].t = 0;
+                    } else {
+                        burned = true;
+                        by_sheep = true;
+                    }
                 }
             }
+            // Forcefield grants complete 360-degree immunity while active!
+            if s.players[i].forcefield > 0 { burned = false; }
             if burned {
                 s.players[i].life = Life.BlackSheep;
                 s.players[i].held = 1;
@@ -1625,7 +1729,7 @@ thread_fn client(url: u8[..128]) {
 
 // ---- sound ------------------------------------------------------------------------------------
 
-struct Sfx { place: audio::Sound, boom: audio::Sound, pickup: audio::Sound, die: audio::Sound, win: audio::Sound, clank: audio::Sound, dance: audio::Sound, warp: audio::Sound }
+struct Sfx { place: audio::Sound, boom: audio::Sound, pickup: audio::Sound, die: audio::Sound, win: audio::Sound, clank: audio::Sound, dance: audio::Sound, warp: audio::Sound, crickets: audio::Sound, rooster: audio::Sound }
 struct Fx { shake: f32, lost: bool, ver_mismatch: i64, dust: float4[..64], last: float2[4] }
 
 // A synthesized effect: a sine sweeping f0 to f1 mixed with low-passed noise, under a decaying envelope.
@@ -1692,10 +1796,89 @@ fn make_night_sfx(r: rng&) -> audio::Sound {
     return audio::create_sound(pcm);
 }
 
+// Evening cricket chirp cue announcing that night is falling!
+fn make_crickets_sfx() -> audio::Sound {
+    let n = 67200; // 1.4s
+    var pcm: f32[>..] = [];
+    pcm.resize(n, 0.0);
+    for i in n {
+        let t = (i as f64) / 48000.0;
+        let master = min(1.0, (i as f64) / 600.0) * min(1.0, ((n - 1 - i) as f64) / 4800.0);
+        var s = 0.0;
+        // Three distinct cricket chirp bursts (each 4 crisp rapid trills at ~4.3kHz + harmonic)
+        let grp = i % 22000;
+        if grp < 12800 {
+            let sub = grp % 3200;
+            if sub < 2100 {
+                let env = sin((sub as f64) * 3.14159265 / 2100.0);
+                let carrier = sin(TAU * 4320.0 * t) + 0.35 * sin(TAU * 8640.0 * t);
+                s += carrier * 0.28 * env;
+            }
+        }
+        // Second slightly higher background cricket offset in time
+        let grp2 = (i + 9500) % 24000;
+        if grp2 < 9600 {
+            let sub2 = grp2 % 3200;
+            if sub2 < 1900 {
+                let env2 = sin((sub2 as f64) * 3.14159265 / 1900.0);
+                s += (sin(TAU * 4760.0 * t) + 0.25 * sin(TAU * 9520.0 * t)) * 0.16 * env2;
+            }
+        }
+        pcm[i] = max(-1.0, min(1.0, s * master)) as f32;
+    }
+    return audio::create_sound(pcm);
+}
+
+// Classic 4-syllable farm rooster crow ("Cock-a-doodle-DOOOO!") announcing that day is coming!
+fn make_rooster_sfx() -> audio::Sound {
+    let n = 72000; // 1.5s
+    var pcm: f32[>..] = [];
+    pcm.resize(n, 0.0);
+    var ph = 0.0;
+    for i in n {
+        let t = (i as f64) / 48000.0;
+        var freq = 0.0;
+        var amp = 0.0;
+        if t < 0.16 {
+            // "Cock-" (sharp rising bark: 680 -> 960 Hz)
+            let u = t / 0.16;
+            freq = 680.0 + 280.0 * u;
+            amp = sin(u * 3.14159265) * 0.75;
+        } else if t >= 0.20 && t < 0.33 {
+            // "-a-" (quick mid chirp: 860 -> 1040 Hz)
+            let u = (t - 0.20) / 0.13;
+            freq = 860.0 + 180.0 * u;
+            amp = sin(u * 3.14159265) * 0.68;
+        } else if t >= 0.36 && t < 0.56 {
+            // "-doo-dle-" (bright stepping jump: 1080 -> 1320 -> 1180 Hz)
+            let u = (t - 0.36) / 0.20;
+            freq = 1080.0 + 240.0 * sin(u * 3.14159265);
+            amp = sin(u * 3.14159265) * 0.82;
+        } else if t >= 0.60 && t < 1.44 {
+            // "-DOOOOOOO!" (long iconic high crow at ~1420 Hz with nasal vibrato & trailing drop to 980 Hz)
+            let u = (t - 0.60) / 0.84;
+            let drop = if u > 0.65 { ((u - 0.65) / 0.35) * ((u - 0.65) / 0.35) * 460.0 } else { 0.0 };
+            let rise = if u < 0.12 { (1.0 - u / 0.12) * 220.0 } else { 0.0 };
+            freq = 1420.0 - rise - drop + sin(TAU * 26.0 * t) * 24.0;
+            let atk = min(1.0, u / 0.08);
+            let rel = if u > 0.72 { max(0.0, (1.0 - u) / 0.28) } else { 1.0 };
+            amp = atk * rel * 0.92;
+        }
+        if amp > 0.0 {
+            ph += TAU * freq / 48000.0;
+            // Bright nasal rooster timbre (rich harmonics + raspy crow modulation)
+            let rasp = 1.0 + 0.15 * sin(TAU * 52.0 * t);
+            let w = (sin(ph) * 0.42 + sin(2.0 * ph) * 0.36 + sin(3.0 * ph) * 0.22 + sin(4.0 * ph) * 0.12) * rasp;
+            pcm[i] = max(-1.0, min(1.0, w * amp * 0.55)) as f32;
+        }
+    }
+    return audio::create_sound(pcm);
+}
+
 fn make_sfx(r: rng&) -> Sfx {
     Sfx { synth(r, 0.12, 220.0, 110.0, 0.1, 6.0), synth(r, 0.7, 90.0, 35.0, 0.85, 4.5), synth(r, 0.25, 500.0, 1100.0, 0.0, 5.0),
           synth(r, 0.6, 400.0, 60.0, 0.1, 3.0), synth(r, 0.7, 523.0, 1318.0, 0.0, 2.0), synth(r, 0.1, 1200.0, 800.0, 0.5, 12.0),
-          make_dance_sfx(), synth(r, 0.28, 320.0, 1320.0, 0.12, 4.0) }
+          make_dance_sfx(), synth(r, 0.28, 320.0, 1320.0, 0.12, 4.0), make_crickets_sfx(), make_rooster_sfx() }
 }
 
 // Adds midi note m at sample `at` for n samples: kind 0 is a 50% pulse, 1 a 25% pulse, 2 a triangle.
@@ -2010,16 +2193,26 @@ fn hear(prev: State&, s: State&, sfx: Sfx, fx: Fx&) {
         audio::play(sfx.boom, 0.65, pan(prev.fireballs[0].x as i64), 1.35, false);
         if fx.shake < 4.5 { fx.shake = 4.5; }
     }
+    if s.day_night_on != 0 && s.over == 0 {
+        if prev.day_phase < 900 && s.day_phase >= 900 {
+            audio::play(sfx.crickets, 0.72, 0.0, 1.0, false);
+        } else if prev.day_phase < 2100 && s.day_phase >= 2100 {
+            audio::play(sfx.rooster, 0.78, 0.0, 1.0, false);
+        }
+    }
     for i in 4 {
         let a = prev.players[i];
         let b = s.players[i];
         guard a.life != Life.Off && b.life != Life.Off else { continue; }
         let vol = if i == s.you { 0.8 } else { 0.4 };
         if a.life == Life.Alive && b.life != Life.Alive { audio::play(sfx.die, 0.8, pan(b.x), 1.0, false); }
+        if a.life == Life.Alive && b.life == Life.Alive && b.shield < a.shield {
+            audio::play(sfx.clank, 0.85, pan(b.x), 1.45, false);
+        }
         if abs(b.x - a.x) + abs(b.y - a.y) > TILE * 2 { audio::play(sfx.warp, vol, pan(b.x), 1.0, false); }
-        let got_pwr = b.range + b.bombs + b.speed + b.mines + b.missiles + b.builds + b.dir_bombs + b.fireballs > a.range + a.bombs + a.speed + a.mines + a.missiles + a.builds + a.dir_bombs + a.fireballs ||
+        let got_pwr = b.range + b.bombs + b.speed + b.mines + b.missiles + b.builds + b.dir_bombs + b.fireballs + b.shield > a.range + a.bombs + a.speed + a.mines + a.missiles + a.builds + a.dir_bombs + a.fireballs + a.shield ||
                       (a.ghost == 0 && b.ghost > 0) || (a.kick == 0 && b.kick > 0) || (a.unkick == 0 && b.unkick > 0) ||
-                      (a.napalm == 0 && b.napalm > 0) || (b.flamer > a.flamer) || (a.drunk == 0 && b.drunk > 0);
+                      (a.napalm == 0 && b.napalm > 0) || (b.flamer > a.flamer) || (b.forcefield > a.forcefield) || (a.drunk == 0 && b.drunk > 0);
         if got_pwr { audio::play(sfx.pickup, vol, pan(b.x), if b.slow > a.slow { 0.65 } else { 1.0 }, false); }
         if b.wins > a.wins && s.over == 0 { audio::play(sfx.win, 0.8, 0.0, 1.0, false); }
     }
@@ -2646,6 +2839,8 @@ fn draw_power(c: ui::Context, g: u8, x: f32, y0: f32, t: f32, tm: f32) {
                 else if g == TILE_PWR_DIRBOMB { ui::rgb(198, 148, 24) }
                 else if g == TILE_PWR_FLAMER { ui::rgb(225, 68, 28) }
                 else if g == TILE_PWR_FIREBALL { ui::rgb(235, 112, 18) }
+                else if g == TILE_PWR_SHIELD { ui::rgb(42, 102, 198) }
+                else if g == TILE_PWR_FORCEFIELD { ui::rgb(82, 68, 212) }
                 else { ui::rgb(30, 150, 205) };
     ui::fill_circle(c, ui::rect(x + t * 0.04, y + t * 0.04, t * 0.92, t * 0.92), ui::rgba(255, 255, 255, 40));
     ui::fill_rect(c, ui::rect(x + t * 0.14, y + t * 0.14, t * 0.72, t * 0.72), t * 0.18, plate);
@@ -2721,6 +2916,30 @@ fn draw_power(c: ui::Context, g: u8, x: f32, y0: f32, t: f32, tm: f32) {
         ui::fill_triangle(c, x + t * 0.2, y + t * 0.62, x + t * 0.56, y + t * 0.32, x + t * 0.66, y + t * 0.68, ui::rgb(255, 130, 30));
         ui::fill_circle(c, ui::rect(x + t * 0.42, y + t * 0.28, t * 0.36, t * 0.36), ui::rgb(255, 225, 80));
         ui::fill_circle(c, ui::rect(x + t * 0.5, y + t * 0.36, t * 0.2, t * 0.2), ui::rgb(255, 255, 230));
+    } else if g == TILE_PWR_SHIELD { // directional kite shield
+        let rim = ui::rgb(230, 242, 255);
+        let body = ui::rgb(78, 158, 248);
+        ui::fill_rect(c, ui::rect(x + t * 0.27, y + t * 0.22, t * 0.46, t * 0.32), t * 0.06, rim);
+        ui::fill_triangle(c, x + t * 0.27, y + t * 0.50, x + t * 0.73, y + t * 0.50, x + t * 0.50, y + t * 0.80, rim);
+        ui::fill_rect(c, ui::rect(x + t * 0.32, y + t * 0.27, t * 0.36, t * 0.24), t * 0.04, body);
+        ui::fill_triangle(c, x + t * 0.32, y + t * 0.49, x + t * 0.68, y + t * 0.49, x + t * 0.50, y + t * 0.73, body);
+        ui::stroke_line(c, x + t * 0.50, y + t * 0.31, x + t * 0.50, y + t * 0.66, 2.5, ui::rgb(255, 248, 210));
+        ui::stroke_line(c, x + t * 0.36, y + t * 0.43, x + t * 0.64, y + t * 0.43, 2.5, ui::rgb(255, 248, 210));
+    } else if g == TILE_PWR_FORCEFIELD { // 360-degree glowing energy bubble
+        let pulse = 0.03 * sin(tm * 7.0 + x);
+        let r = t * (0.29 + pulse);
+        let cx = x + t * 0.50;
+        let cy = y + t * 0.50;
+        ui::fill_circle(c, ui::rect(cx - r, cy - r, r * 2.0, r * 2.0), ui::rgba(90, 235, 255, 115));
+        ui::stroke_circle(c, ui::rect(cx - r, cy - r, r * 2.0, r * 2.0), 2.5, ui::rgb(130, 248, 255));
+        ui::stroke_circle(c, ui::rect(cx - r * 0.64, cy - r * 0.64, r * 1.28, r * 1.28), 1.8, ui::rgb(230, 175, 255));
+        ui::fill_circle(c, ui::rect(cx - t * 0.09, cy - t * 0.09, t * 0.18, t * 0.18), ui::rgb(255, 255, 255));
+        for k in 3 {
+            let a = tm * 4.5 + (k as f32) * 2.0944;
+            let sx = cx + cos(a) * r;
+            let sy = cy + sin(a) * r;
+            ui::fill_circle(c, ui::rect(sx - 2.5, sy - 2.5, 5.0, 5.0), ui::rgb(255, 255, 255));
+        }
     } else {             // bolt
         ui::fill_triangle(c, x + t * 0.56, y + t * 0.2, x + t * 0.34, y + t * 0.52, x + t * 0.52, y + t * 0.52, ui::rgb(255, 235, 90));
         ui::fill_triangle(c, x + t * 0.48, y + t * 0.46, x + t * 0.68, y + t * 0.46, x + t * 0.44, y + t * 0.8, ui::rgb(255, 235, 90));
@@ -3514,6 +3733,79 @@ fn draw_flamer(c: ui::Context, s: State&, i: i64, pos: float2, ox: f32, oy: f32,
     }
 }
 
+// Active directional Shield and 360-degree Forcefield visual overlays on alive players.
+fn draw_defense_fx(c: ui::Context, s: State&, i: i64, px: f32, py: f32, t: f32, tm: f32, night: bool) {
+    let p = s.players[i];
+    if p.life != Life.Alive { return; }
+    if p.shield == 0 && p.shield_cd == 0 && p.forcefield == 0 { return; }
+    if p.ghost > 0 && i != s.you { return; }
+    let ptx = p.x / TILE;
+    let pty = p.y / TILE;
+    if ptx >= 0 && ptx < W && pty >= 0 && pty < H && s.grid[pty * W + ptx] == TILE_BRUSH && i != s.you { return; }
+    // Directional riot shield held on the player's facing side
+    if p.shield > 0 || p.shield_cd > 0 {
+        let fdir = if p.facing == Dir.None { Dir.Down } else { p.facing };
+        let fdx = dir_dx(fdir) as f32;
+        let fdy = dir_dy(fdir) as f32;
+        let perp_x = -fdy;
+        let perp_y = fdx;
+        let flash = p.shield_cd > 0 && ((p.shield_cd / 3) % 2 == 0);
+        let dist = t * 0.45;
+        let half_w = t * 0.38;
+        let bend = t * 0.10;
+        let cx = px + fdx * dist;
+        let cy = py + fdy * dist;
+        let x1 = cx + perp_x * half_w - fdx * bend;
+        let y1 = cy + perp_y * half_w - fdy * bend;
+        let x2 = cx - perp_x * half_w - fdx * bend;
+        let y2 = cy - perp_y * half_w - fdy * bend;
+        let mx = cx + fdx * (t * 0.06);
+        let my = cy + fdy * (t * 0.06);
+        let a_glow: i64 = if night { 120 } else { 85 };
+        let a_core: i64 = if night { 225 } else { 245 };
+        let glow_col = if flash { ui::rgba(255, 240, 140, 175) } else { ui::rgba(90, 190, 255, a_glow) };
+        let rim_col = if flash { ui::rgba(255, 255, 235, 255) } else { ui::rgba(215, 240, 255, a_core) };
+        let body_col = if flash { ui::rgba(255, 215, 90, 255) } else { ui::rgba(52, 138, 245, a_core) };
+        // Soft aura behind the curved shield arc
+        ui::stroke_line(c, x1, y1, mx, my, max(7.0, t * 0.22), glow_col);
+        ui::stroke_line(c, mx, my, x2, y2, max(7.0, t * 0.22), glow_col);
+        // Metallic outer rim + armored blue center bar
+        ui::stroke_line(c, x1, y1, mx, my, max(4.5, t * 0.14), rim_col);
+        ui::stroke_line(c, mx, my, x2, y2, max(4.5, t * 0.14), rim_col);
+        ui::stroke_line(c, x1, y1, mx, my, max(2.5, t * 0.08), body_col);
+        ui::stroke_line(c, mx, my, x2, y2, max(2.5, t * 0.08), body_col);
+        // Hit-count pips along the shield face (1..6 hits left)
+        let n = min(6, p.shield as i64);
+        for k in n {
+            let u = if n <= 1 { 0.0 } else { ((k as f32) / ((n - 1) as f32) - 0.5) * 1.45 };
+            let bx = cx + perp_x * (half_w * u) + fdx * (t * 0.04 - abs(u) * bend * 0.55);
+            let by = cy + perp_y * (half_w * u) + fdy * (t * 0.04 - abs(u) * bend * 0.55);
+            let pr = max(2.0, t * 0.055);
+            ui::fill_circle(c, ui::rect(bx - pr, by - pr, pr * 2.0, pr * 2.0), ui::rgb(255, 245, 165));
+        }
+    }
+    // 360-degree timed Forcefield bubble
+    if p.forcefield > 0 {
+        let warn = p.forcefield < 90;
+        if warn && ((p.forcefield / 5) % 2 == 0) { return; }
+        let pulse = 0.03 * sin(tm * 10.0 + (i as f32) * 1.3);
+        let r = t * (0.55 + pulse);
+        let fill_a: i64 = if night { 75 } else { 58 };
+        let outer_col = if warn { ui::rgba(255, 195, 95, 235) } else { ui::rgba(105, 242, 255, 230) };
+        let inner_col = if warn { ui::rgba(255, 130, 185, 195) } else { ui::rgba(195, 135, 255, 190) };
+        ui::fill_circle(c, ui::rect(px - r, py - r, r * 2.0, r * 2.0), ui::rgba(75, 215, 255, fill_a));
+        ui::stroke_circle(c, ui::rect(px - r, py - r, r * 2.0, r * 2.0), 3.0, outer_col);
+        ui::stroke_circle(c, ui::rect(px - r * 0.84, py - r * 0.84, r * 1.68, r * 1.68), 1.8, inner_col);
+        for k in 4 {
+            let a = tm * 5.2 + (k as f32) * 1.5708 + (i as f32);
+            let sx = px + cos(a) * r;
+            let sy = py + sin(a) * r;
+            let sr = max(2.2, t * 0.065);
+            ui::fill_circle(c, ui::rect(sx - sr, sy - sr, sr * 2.0, sr * 2.0), ui::rgb(245, 255, 255));
+        }
+    }
+}
+
 fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&, mode: const u8[:], sc: f32, atlas: gfx::Texture, replay_age: f32) {
     let is_replay = replay_age >= 0.0;
     let detailed_tex = s.detailed_tex != 0;
@@ -3581,7 +3873,10 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
                 let pty = (s.players[i].y / TILE);
                 let in_brush = ptx >= 0 && ptx < W && pty >= 0 && pty < H && s.grid[pty * W + ptx] == TILE_BRUSH;
                 if life == Life.Alive {
-                    if !in_brush || i == s.you { draw_player(hud, s, i, px, py, t, tm); }
+                    if !in_brush || i == s.you {
+                        draw_player(hud, s, i, px, py, t, tm);
+                        draw_defense_fx(hud, s, i, px, py, t, tm, false);
+                    }
                 } else if life == Life.BlackSheep { draw_black_sheep(hud, s, i, px, py, t, tm); }
             }
         }
@@ -3676,6 +3971,7 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
                     ui::fill_circle(hud, ui::rect(px + t * 0.03 + lx, py - t * 0.06 + ly, t * 0.11, t * 0.13), eye_col);
                     ui::fill_circle(hud, ui::rect(px - t * 0.105 + lx * 1.3, py - t * 0.02 + ly * 1.3, t * 0.045, t * 0.055), ui::rgba(15, 15, 22, ea));
                     ui::fill_circle(hud, ui::rect(px + t * 0.065 + lx * 1.3, py - t * 0.02 + ly * 1.3, t * 0.045, t * 0.055), ui::rgba(15, 15, 22, ea));
+                    draw_defense_fx(hud, s, i, px, oy + shown[i].y / TILE * t, t, tm, true);
                 }
             }
         }
@@ -3697,6 +3993,8 @@ fn draw(hud: ui::Context, big: ui::Context, s: State&, shown: float2[:], fx: Fx&
                 if me.dir_bombs > 0 { format(st, "DirBomb x", me.dir_bombs, " [Space]  "); }
                 if me.fireballs > 0 { format(st, "Fireball x", me.fireballs, " [F]  "); }
                 if me.flamer > 0 { format(st, "FLAMETHROWER ", (me.flamer as i64 + 59) / 60, "s  "); }
+                if me.shield > 0 { format(st, "SHIELD x", me.shield, "  "); }
+                if me.forcefield > 0 { format(st, "FORCEFIELD ", (me.forcefield as i64 + 59) / 60, "s  "); }
                 if me.napalm > 0 { st.append("NAPALM  "); }
                 if me.drunk > 0 { st.append("DRUNK!  "); }
                 if me.unkick != 0 { st.append("AnchorBombs  "); }
@@ -5296,6 +5594,8 @@ fn main() {
                 var p12 = (s.power_mask & PWR_DIRBOMB) != 0;
                 var p13 = (s.power_mask & PWR_FLAMER) != 0;
                 var p14 = (s.power_mask & PWR_FIREBALL) != 0;
+                var p15 = (s.power_mask & PWR_SHIELD) != 0;
+                var p16 = (s.power_mask & PWR_FORCEFIELD) != 0;
                 ui::layout_row_dynamic(menu, 30.0, 2);
                 ui::checkbox_label(menu, "Flame (Range+)", p0);
                 ui::checkbox_label(menu, "Extra Bomb", p1);
@@ -5319,6 +5619,9 @@ fn main() {
                 ui::checkbox_label(menu, "Flamethrower", p13);
                 ui::layout_row_dynamic(menu, 30.0, 2);
                 ui::checkbox_label(menu, "Fireball Thrower (F)", p14);
+                ui::checkbox_label(menu, "Shield (Front Block)", p15);
+                ui::layout_row_dynamic(menu, 30.0, 2);
+                ui::checkbox_label(menu, "Forcefield (360 Timed)", p16);
                 var p_on = s.portals_on != 0;
                 if ui::checkbox_label(menu, "Portals Enabled", p_on) {
                     s.portals_on = if p_on { 1 } else { 0 };
@@ -5353,6 +5656,8 @@ fn main() {
                 if p12 { nm |= PWR_DIRBOMB; }
                 if p13 { nm |= PWR_FLAMER; }
                 if p14 { nm |= PWR_FIREBALL; }
+                if p15 { nm |= PWR_SHIELD; }
+                if p16 { nm |= PWR_FORCEFIELD; }
                 s.power_mask = nm;
                 ui::layout_row_dynamic(menu, 38.0, 2);
                 if ui::button_label(menu, "New Round") { reset_round(s, r); host_open = false; }
