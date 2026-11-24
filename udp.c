@@ -15,6 +15,8 @@ typedef SOCKET sock_t;
 #include <netdb.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 typedef int sock_t;
 #define BAD (-1)
 #endif
@@ -93,11 +95,39 @@ int64_t udp_recv(int64_t fd, bslice b, int64_t *from) {
     return r;
 }
 
-// Writes the machine's primary outbound IPv4 address (e.g. "192.168.4.46") into b. Returns length, or 0 on failure.
+// Writes the machine's primary LAN IPv4 address (e.g. "10.0.0.101" / "192.168.4.46") into b. Returns length, or 0 on failure.
 int64_t udp_local_ip(bslice b) {
 #ifdef _WIN32
     WSADATA w;
     WSAStartup(MAKEWORD(2, 2), &w);
+#else
+    struct ifaddrs *ifas = NULL;
+    if (getifaddrs(&ifas) == 0 && ifas) {
+        char best[64] = {0};
+        for (int pass = 0; pass < 2 && !best[0]; pass++) {
+            for (struct ifaddrs *ifa = ifas; ifa; ifa = ifa->ifa_next) {
+                if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) continue;
+                unsigned fl = ifa->ifa_flags;
+                if (!(fl & IFF_UP) || !(fl & IFF_RUNNING)) continue;
+                if ((fl & IFF_LOOPBACK) || (fl & IFF_POINTOPOINT) || !(fl & IFF_BROADCAST)) continue;
+                struct sockaddr_in *sin = (struct sockaddr_in *)ifa->ifa_addr;
+                uint32_t h = ntohl(sin->sin_addr.s_addr);
+                unsigned b0 = (h >> 24) & 255, b1 = (h >> 16) & 255;
+                if (b0 == 0 || b0 == 127 || (b0 == 169 && b1 == 254)) continue;
+                int priv = (b0 == 10) || (b0 == 192 && b1 == 168) || (b0 == 172 && b1 >= 16 && b1 <= 31);
+                if (pass == 0 && !priv) continue;
+                if (inet_ntop(AF_INET, &sin->sin_addr, best, sizeof best)) break;
+            }
+        }
+        freeifaddrs(ifas);
+        if (best[0]) {
+            int64_t n = (int64_t)strlen(best);
+            if (n > 0 && n <= b.len) {
+                memcpy(b.data, best, (size_t)n);
+                return n;
+            }
+        }
+    }
 #endif
     sock_t s = socket(AF_INET, SOCK_DGRAM, 0);
     if (s == BAD) return 0;

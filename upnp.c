@@ -1,4 +1,4 @@
-// Zero-dependency automatic port forwarding (UPnP IGD + NAT-PMP) for macOS/Linux/Windows.
+// Zero-dependency automatic port forwarding (UPnP IGD + NAT-PMP + PCP v2) for macOS/Linux/Windows.
 // Maps TCP and UDP on the requested port, queries external IP, and detects CGNAT/double-NAT.
 #include <stdint.h>
 #include <stdio.h>
@@ -19,6 +19,8 @@ typedef SOCKET usock_t;
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 typedef int usock_t;
 #define UBAD (-1)
 #define UCLOSE(s) close(s)
@@ -27,12 +29,14 @@ typedef int usock_t;
 typedef struct { uint8_t *data; int64_t len; } ub_slice;
 
 // Saved state for clean unmapping when switching modes or exiting.
-static int g_method = 0; // 0 = none, 1 = UPnP, 2 = NAT-PMP
+static int g_method = 0; // 0 = none, 1 = UPnP, 2 = NAT-PMP, 3 = PCP v2
 static char g_ctrl_host[128];
 static int g_ctrl_port = 80;
 static char g_ctrl_path[256];
 static char g_service[128];
 static char g_gw_ip[64];
+static char g_lan_ip[64];
+static uint8_t g_pcp_nonce[12];
 static int g_mapped_port = 0;
 
 static void net_init(void) {
@@ -56,29 +60,13 @@ static void set_timeouts(usock_t s, int ms) {
 #endif
 }
 
-static int get_local_ipv4(char *out, size_t cap) {
-    usock_t s = socket(AF_INET, SOCK_DGRAM, 0);
-    if (s == UBAD) return 0;
-    struct sockaddr_in dst;
-    memset(&dst, 0, sizeof dst);
-    dst.sin_family = AF_INET;
-    dst.sin_port = htons(53);
-    dst.sin_addr.s_addr = htonl(0x08080808);
-    int ok = connect(s, (struct sockaddr *)&dst, sizeof dst) == 0;
-    struct sockaddr_in loc;
-    memset(&loc, 0, sizeof loc);
+static int64_t now_ms(void) {
 #ifdef _WIN32
-    int len = (int)sizeof loc;
+    return (int64_t)GetTickCount64();
 #else
-    socklen_t len = sizeof loc;
-#endif
-    if (ok) ok = getsockname(s, (struct sockaddr *)&loc, &len) == 0;
-    UCLOSE(s);
-    if (!ok) return 0;
-#ifdef _WIN32
-    return inet_ntop(AF_INET, &loc.sin_addr, out, cap) != NULL;
-#else
-    return inet_ntop(AF_INET, &loc.sin_addr, out, (socklen_t)cap) != NULL;
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (int64_t)tv.tv_sec * 1000 + (int64_t)(tv.tv_usec / 1000);
 #endif
 }
 
@@ -94,6 +82,106 @@ static int is_private_or_cgnat(const char *ip) {
     if (b0 == 172 && b1 >= 16 && b1 <= 31) return 1;
     if (b0 == 192 && b1 == 168) return 1;
     return 0;
+}
+
+static int is_rfc1918(uint32_t h) {
+    unsigned b0 = (h >> 24) & 255;
+    unsigned b1 = (h >> 16) & 255;
+    if (b0 == 10) return 1;
+    if (b0 == 172 && b1 >= 16 && b1 <= 31) return 1;
+    if (b0 == 192 && b1 == 168) return 1;
+    return 0;
+}
+
+static int add_ip_unique(char ips[][64], int count, int max_ips, const char *ip) {
+    if (count >= max_ips || !ip || !ip[0]) return count;
+    for (int i = 0; i < count; i++) {
+        if (strcmp(ips[i], ip) == 0) return count;
+    }
+    snprintf(ips[count], 64, "%s", ip);
+    return count + 1;
+}
+
+// Collect real broadcast-capable LAN IPv4 addresses (skipping VPN utun / point-to-point interfaces).
+static int get_lan_ipv4s(char ips[][64], int max_ips) {
+    int count = 0;
+#ifndef _WIN32
+    struct ifaddrs *ifas = NULL;
+    if (getifaddrs(&ifas) == 0 && ifas) {
+        // Pass 1: RFC1918 broadcast LAN interfaces (en0, eth0, wlan0, etc.), skipping VPN/utun (IFF_POINTOPOINT).
+        // Pass 2: Any remaining non-loopback, non-link-local, non-point-to-point IPv4 interface.
+        for (int pass = 0; pass < 2; pass++) {
+            for (struct ifaddrs *ifa = ifas; ifa; ifa = ifa->ifa_next) {
+                if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) continue;
+                unsigned fl = ifa->ifa_flags;
+                if (!(fl & IFF_UP) || !(fl & IFF_RUNNING)) continue;
+                if ((fl & IFF_LOOPBACK) || (fl & IFF_POINTOPOINT)) continue;
+                if (!(fl & IFF_BROADCAST)) continue;
+                struct sockaddr_in *sin = (struct sockaddr_in *)ifa->ifa_addr;
+                uint32_t h = ntohl(sin->sin_addr.s_addr);
+                unsigned b0 = (h >> 24) & 255;
+                unsigned b1 = (h >> 16) & 255;
+                if (b0 == 0 || b0 == 127 || (b0 == 169 && b1 == 254)) continue;
+                if (pass == 0 && !is_rfc1918(h)) continue;
+                char buf[64];
+                if (inet_ntop(AF_INET, &sin->sin_addr, buf, sizeof buf)) {
+                    count = add_ip_unique(ips, count, max_ips, buf);
+                }
+            }
+        }
+        freeifaddrs(ifas);
+    }
+#else
+    char hname[256];
+    if (gethostname(hname, sizeof hname) == 0) {
+        struct addrinfo hints, *res = NULL;
+        memset(&hints, 0, sizeof hints);
+        hints.ai_family = AF_INET;
+        if (getaddrinfo(hname, NULL, &hints, &res) == 0 && res) {
+            for (int pass = 0; pass < 2; pass++) {
+                for (struct addrinfo *p = res; p; p = p->ai_next) {
+                    struct sockaddr_in *sin = (struct sockaddr_in *)p->ai_addr;
+                    uint32_t h = ntohl(sin->sin_addr.s_addr);
+                    unsigned b0 = (h >> 24) & 255;
+                    unsigned b1 = (h >> 16) & 255;
+                    if (b0 == 0 || b0 == 127 || (b0 == 169 && b1 == 254)) continue;
+                    if (pass == 0 && !is_rfc1918(h)) continue;
+                    char buf[64];
+                    if (inet_ntop(AF_INET, &sin->sin_addr, buf, sizeof buf)) {
+                        count = add_ip_unique(ips, count, max_ips, buf);
+                    }
+                }
+            }
+            freeaddrinfo(res);
+        }
+    }
+#endif
+    // Fallback: route-selected local IP toward 8.8.8.8
+    usock_t s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s != UBAD) {
+        struct sockaddr_in dst;
+        memset(&dst, 0, sizeof dst);
+        dst.sin_family = AF_INET;
+        dst.sin_port = htons(53);
+        dst.sin_addr.s_addr = htonl(0x08080808);
+        if (connect(s, (struct sockaddr *)&dst, sizeof dst) == 0) {
+            struct sockaddr_in loc;
+            memset(&loc, 0, sizeof loc);
+#ifdef _WIN32
+            int len = (int)sizeof loc;
+#else
+            socklen_t len = sizeof loc;
+#endif
+            if (getsockname(s, (struct sockaddr *)&loc, &len) == 0) {
+                char buf[64];
+                if (inet_ntop(AF_INET, &loc.sin_addr, buf, sizeof buf)) {
+                    count = add_ip_unique(ips, count, max_ips, buf);
+                }
+            }
+        }
+        UCLOSE(s);
+    }
+    return count;
 }
 
 static const char *ci_strstr(const char *hay, const char *needle) {
@@ -182,36 +270,65 @@ static int xml_extract(const char *xml, const char *tag, char *out, size_t cap) 
     return 1;
 }
 
-static int upnp_discover(char *loc_url, size_t cap) {
+// Discover ALL unique SSDP device Location URLs on `local_ip` (multicast + unicast to gateway) over ~1200ms.
+static int upnp_discover_all(const char *local_ip, const char *gw_ip, char urls[][256], int max_urls) {
     usock_t s = socket(AF_INET, SOCK_DGRAM, 0);
     if (s == UBAD) return 0;
-    set_timeouts(s, 450);
-    struct sockaddr_in dst;
-    memset(&dst, 0, sizeof dst);
-    dst.sin_family = AF_INET;
-    dst.sin_port = htons(1900);
-    inet_pton(AF_INET, "239.255.255.250", &dst.sin_addr);
 
-    static const char *sts[3] = {
+    struct in_addr lip_addr;
+    if (inet_pton(AF_INET, local_ip, &lip_addr) != 1) { UCLOSE(s); return 0; }
+
+    // Bind explicitly to the LAN interface and set IP_MULTICAST_IF so VPN tunnels don't hijack SSDP!
+    struct sockaddr_in loc;
+    memset(&loc, 0, sizeof loc);
+    loc.sin_family = AF_INET;
+    loc.sin_addr = lip_addr;
+    loc.sin_port = 0;
+    bind(s, (struct sockaddr *)&loc, sizeof loc);
+    setsockopt(s, IPPROTO_IP, IP_MULTICAST_IF, (const char *)&lip_addr, sizeof lip_addr);
+    unsigned char ttl = 2;
+    setsockopt(s, IPPROTO_IP, IP_MULTICAST_TTL, (const char *)&ttl, sizeof ttl);
+    set_timeouts(s, 250);
+
+    struct sockaddr_in mcast;
+    memset(&mcast, 0, sizeof mcast);
+    mcast.sin_family = AF_INET;
+    mcast.sin_port = htons(1900);
+    inet_pton(AF_INET, "239.255.255.250", &mcast.sin_addr);
+
+    struct sockaddr_in ucast;
+    memset(&ucast, 0, sizeof ucast);
+    ucast.sin_family = AF_INET;
+    ucast.sin_port = htons(1900);
+    int has_gw = gw_ip && gw_ip[0] && inet_pton(AF_INET, gw_ip, &ucast.sin_addr) == 1;
+
+    static const char *sts[5] = {
         "urn:schemas-upnp-org:device:InternetGatewayDevice:1",
         "urn:schemas-upnp-org:device:InternetGatewayDevice:2",
-        "urn:schemas-upnp-org:service:WANIPConnection:1"
+        "urn:schemas-upnp-org:service:WANIPConnection:1",
+        "urn:schemas-upnp-org:service:WANPPPConnection:1",
+        "upnp:rootdevice"
     };
     char req[512];
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 5; i++) {
         int n = snprintf(req, sizeof req,
             "M-SEARCH * HTTP/1.1\r\n"
             "HOST: 239.255.255.250:1900\r\n"
             "MAN: \"ssdp:discover\"\r\n"
             "MX: 1\r\n"
             "ST: %s\r\n\r\n", sts[i]);
-        sendto(s, req, n, 0, (struct sockaddr *)&dst, sizeof dst);
+        sendto(s, req, n, 0, (struct sockaddr *)&mcast, sizeof mcast);
+        if (has_gw && i < 2) {
+            sendto(s, req, n, 0, (struct sockaddr *)&ucast, sizeof ucast);
+        }
     }
 
-    char buf[2048];
-    for (int tries = 0; tries < 6; tries++) {
+    int count = 0;
+    int64_t deadline = now_ms() + 1250;
+    char buf[4096];
+    while (count < max_urls && now_ms() < deadline) {
         int r = (int)recvfrom(s, buf, (int)sizeof(buf) - 1, 0, NULL, NULL);
-        if (r <= 0) break;
+        if (r <= 0) continue;
         buf[r] = 0;
         const char *l = ci_strstr(buf, "\nlocation:");
         if (!l) l = ci_strstr(buf, "location:");
@@ -223,15 +340,20 @@ static int upnp_discover(char *loc_url, size_t cap) {
         const char *e = v;
         while (*e && *e != '\r' && *e != '\n') e++;
         size_t len = (size_t)(e - v);
-        if (len > 7 && len < cap) {
-            memcpy(loc_url, v, len);
-            loc_url[len] = 0;
-            UCLOSE(s);
-            return 1;
+        if (len > 7 && len < 255) {
+            char tmp[256];
+            memcpy(tmp, v, len);
+            tmp[len] = 0;
+            int dup = 0;
+            for (int k = 0; k < count; k++) if (strcmp(urls[k], tmp) == 0) { dup = 1; break; }
+            if (!dup) {
+                snprintf(urls[count], 256, "%s", tmp);
+                count++;
+            }
         }
     }
     UCLOSE(s);
-    return 0;
+    return count;
 }
 
 static int upnp_find_control(const char *loc_url, char *chost, size_t hcap, int *cport, char *cpath, size_t pcap, char *svc, size_t scap) {
@@ -250,36 +372,52 @@ static int upnp_find_control(const char *loc_url, char *chost, size_t hcap, int 
     int got = http_exchange(host, port, req, xml, 65536, 1500);
     if (got <= 0) { free(xml); return 0; }
 
+    // Respect optional <URLBase> if the router specifies one
+    char base_host[128];
+    int base_port = port;
+    char base_path[256];
+    snprintf(base_host, sizeof base_host, "%s", host);
+    base_path[0] = 0;
+    char ubase[256];
+    if (xml_extract(xml, "URLBase", ubase, sizeof ubase)) {
+        parse_http_url(ubase, base_host, sizeof base_host, &base_port, base_path, sizeof base_path);
+    }
+
     static const char *targets[3] = {
         "urn:schemas-upnp-org:service:WANIPConnection:1",
         "urn:schemas-upnp-org:service:WANIPConnection:2",
         "urn:schemas-upnp-org:service:WANPPPConnection:1"
     };
     int found = 0;
-    for (int t = 0; t < 3 && !found; t++) {
-        const char *pos = xml;
-        while ((pos = ci_strstr(pos, targets[t])) != NULL) {
-            // Walk back slightly or search forward within this <service> block for <controlURL>
-            const char *end_svc = ci_strstr(pos, "</service>");
-            const char *cu = ci_strstr(pos, "<controlURL>");
-            if (cu && (!end_svc || cu < end_svc)) {
-                char raw[256];
-                if (xml_extract(cu, "controlURL", raw, sizeof raw)) {
-                    snprintf(svc, scap, "%s", targets[t]);
-                    if (ci_strstr(raw, "http://") == raw) {
-                        found = parse_http_url(raw, chost, hcap, cport, cpath, pcap);
-                    } else {
-                        snprintf(chost, hcap, "%s", host);
-                        *cport = port;
-                        if (raw[0] == '/') snprintf(cpath, pcap, "%s", raw);
-                        else snprintf(cpath, pcap, "/%s", raw);
-                        found = 1;
+    // Scan each <service>...</service> block so <controlURL> is found whether before or after <serviceType>!
+    const char *sv = xml;
+    while (!found && (sv = ci_strstr(sv, "<service>")) != NULL) {
+        const char *sv_end = ci_strstr(sv, "</service>");
+        if (!sv_end) break;
+        size_t blen = (size_t)(sv_end - sv);
+        if (blen < 2048) {
+            char blk[2048];
+            memcpy(blk, sv, blen);
+            blk[blen] = 0;
+            for (int t = 0; t < 3 && !found; t++) {
+                if (ci_strstr(blk, targets[t])) {
+                    char raw[256];
+                    if (xml_extract(blk, "controlURL", raw, sizeof raw)) {
+                        snprintf(svc, scap, "%s", targets[t]);
+                        if (ci_strstr(raw, "http://") == raw) {
+                            found = parse_http_url(raw, chost, hcap, cport, cpath, pcap);
+                        } else {
+                            snprintf(chost, hcap, "%s", base_host);
+                            *cport = base_port;
+                            if (raw[0] == '/') snprintf(cpath, pcap, "%s", raw);
+                            else snprintf(cpath, pcap, "/%s", raw);
+                            found = 1;
+                        }
                     }
-                    break;
                 }
             }
-            pos += strlen(targets[t]);
         }
+        sv = sv_end + 10;
     }
     free(xml);
     return found;
@@ -322,8 +460,8 @@ static int upnp_add_one(const char *host, int port, const char *path, const char
         "<NewLeaseDuration>%d</NewLeaseDuration>",
         ext_port, proto, ext_port, local_ip, lease);
     if (upnp_soap(host, port, path, svc, "AddPortMapping", body, resp, sizeof resp, 1500)) return 1;
-    // Some routers require permanent lease (0) and return error 725.
-    if (lease != 0 && strstr(resp, "725") != NULL) {
+    // Many routers require permanent lease (0) and return UPnP error 725 (OnlyPermanentLeasesSupported).
+    if (lease != 0) {
         return upnp_add_one(host, port, path, svc, local_ip, ext_port, proto, 0);
     }
     return 0;
@@ -340,18 +478,18 @@ static int upnp_del_one(const char *host, int port, const char *path, const char
     return upnp_soap(host, port, path, svc, "DeletePortMapping", body, resp, sizeof resp, 600);
 }
 
-// NAT-PMP (RFC 6886) fallback: try <subnet>.1 on UDP 5351.
-static int natpmp_try(const char *local_ip, int port, char *pub_out, size_t pcap) {
-    struct in_addr a;
-    if (inet_pton(AF_INET, local_ip, &a) != 1) return 0;
-    uint32_t h = ntohl(a.s_addr);
-    struct in_addr gw;
-    gw.s_addr = htonl((h & 0xFFFFFF00u) | 1u);
-    char gw_str[64];
-    if (!inet_ntop(AF_INET, &gw, gw_str, sizeof gw_str)) return 0;
+// NAT-PMP (RFC 6886) on <gw_ip>:5351 bound explicitly to local_ip.
+static int natpmp_try_gw(const char *local_ip, const char *gw_str, int port, char *pub_out, size_t pcap) {
+    struct in_addr lip, gw;
+    if (inet_pton(AF_INET, local_ip, &lip) != 1 || inet_pton(AF_INET, gw_str, &gw) != 1) return 0;
 
     usock_t s = socket(AF_INET, SOCK_DGRAM, 0);
     if (s == UBAD) return 0;
+    struct sockaddr_in loc;
+    memset(&loc, 0, sizeof loc);
+    loc.sin_family = AF_INET;
+    loc.sin_addr = lip;
+    bind(s, (struct sockaddr *)&loc, sizeof loc);
     set_timeouts(s, 450);
 
     struct sockaddr_in dst;
@@ -396,7 +534,83 @@ static int natpmp_try(const char *local_ip, int port, char *pub_out, size_t pcap
     UCLOSE(s);
     if (mapped == 2) {
         snprintf(g_gw_ip, sizeof g_gw_ip, "%s", gw_str);
+        snprintf(g_lan_ip, sizeof g_lan_ip, "%s", local_ip);
         g_method = 2;
+        g_mapped_port = port;
+        return 1;
+    }
+    return 0;
+}
+
+// PCP v2 (RFC 6887) MAP fallback on <gw_ip>:5351 for modern routers that disable UPnP/NAT-PMP v0.
+static int pcp_send_map(usock_t s, const struct sockaddr_in *dst, const struct in_addr *lip,
+                        const uint8_t nonce[12], uint8_t proto, int port, uint32_t life,
+                        char *pub_out, size_t pcap) {
+    uint8_t req[60];
+    memset(req, 0, sizeof req);
+    req[0] = 2; // PCP version 2
+    req[1] = 1; // MAP opcode
+    req[4] = (uint8_t)((life >> 24) & 255);
+    req[5] = (uint8_t)((life >> 16) & 255);
+    req[6] = (uint8_t)((life >> 8) & 255);
+    req[7] = (uint8_t)(life & 255);
+    // IPv4-mapped IPv6 client address at bytes 8..23
+    req[18] = 0xff; req[19] = 0xff;
+    memcpy(req + 20, &lip->s_addr, 4);
+    // MAP payload at bytes 24..59: 12-byte nonce, proto, 3 reserved, internal port, external port, suggested external IP
+    memcpy(req + 24, nonce, 12);
+    req[36] = proto; // 6 = TCP, 17 = UDP
+    req[40] = (uint8_t)((port >> 8) & 255);
+    req[41] = (uint8_t)(port & 255);
+    req[42] = (uint8_t)((port >> 8) & 255);
+    req[43] = (uint8_t)(port & 255);
+    req[54] = 0xff; req[55] = 0xff; // ::ffff:0.0.0.0 (let router assign external IPv4)
+    sendto(s, (const char *)req, sizeof req, 0, (const struct sockaddr *)dst, sizeof *dst);
+    uint8_t resp[128];
+    int r = (int)recvfrom(s, (char *)resp, sizeof resp, 0, NULL, NULL);
+    if (r >= 60 && resp[0] == 2 && resp[1] == 129 && resp[3] == 0) {
+        if (pub_out && pcap > 0 && resp[54] == 0xff && resp[55] == 0xff) {
+            snprintf(pub_out, pcap, "%u.%u.%u.%u", resp[56], resp[57], resp[58], resp[59]);
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static int pcp_try_gw(const char *local_ip, const char *gw_str, int port, char *pub_out, size_t pcap) {
+    struct in_addr lip, gw;
+    if (inet_pton(AF_INET, local_ip, &lip) != 1 || inet_pton(AF_INET, gw_str, &gw) != 1) return 0;
+
+    usock_t s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s == UBAD) return 0;
+    struct sockaddr_in loc;
+    memset(&loc, 0, sizeof loc);
+    loc.sin_family = AF_INET;
+    loc.sin_addr = lip;
+    bind(s, (struct sockaddr *)&loc, sizeof loc);
+    set_timeouts(s, 450);
+
+    struct sockaddr_in dst;
+    memset(&dst, 0, sizeof dst);
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(5351);
+    dst.sin_addr = gw;
+
+    uint8_t nonce[12];
+    int64_t seed = now_ms() ^ (int64_t)port;
+    for (int i = 0; i < 12; i++) {
+        seed = seed * 6364136223846793005LL + 1442695040888963407LL;
+        nonce[i] = (uint8_t)((seed >> 24) & 255);
+    }
+
+    int ok_tcp = pcp_send_map(s, &dst, &lip, nonce, 6, port, 3600, pub_out, pcap);
+    int ok_udp = pcp_send_map(s, &dst, &lip, nonce, 17, port, 3600, pub_out[0] ? NULL : pub_out, pcap);
+    UCLOSE(s);
+    if (ok_tcp && ok_udp) {
+        snprintf(g_gw_ip, sizeof g_gw_ip, "%s", gw_str);
+        snprintf(g_lan_ip, sizeof g_lan_ip, "%s", local_ip);
+        memcpy(g_pcp_nonce, nonce, 12);
+        g_method = 3;
         g_mapped_port = port;
         return 1;
     }
@@ -410,7 +624,7 @@ static void write_slice(ub_slice dst, int64_t *out_len, const char *src) {
     *out_len = n;
 }
 
-// Removes any previously created UPnP or NAT-PMP mapping.
+// Removes any previously created UPnP, NAT-PMP, or PCP mapping.
 int64_t upnp_unmap(int64_t port) {
     if (g_method == 0) return 0;
     int p = port > 0 ? (int)port : g_mapped_port;
@@ -419,22 +633,35 @@ int64_t upnp_unmap(int64_t port) {
     if (g_method == 1) {
         upnp_del_one(g_ctrl_host, g_ctrl_port, g_ctrl_path, g_service, p, "TCP");
         upnp_del_one(g_ctrl_host, g_ctrl_port, g_ctrl_path, g_service, p, "UDP");
-    } else if (g_method == 2) {
+    } else if (g_method == 2 || g_method == 3) {
         usock_t s = socket(AF_INET, SOCK_DGRAM, 0);
         if (s != UBAD) {
+            struct in_addr lip, gw;
+            if (inet_pton(AF_INET, g_lan_ip, &lip) == 1) {
+                struct sockaddr_in loc;
+                memset(&loc, 0, sizeof loc);
+                loc.sin_family = AF_INET;
+                loc.sin_addr = lip;
+                bind(s, (struct sockaddr *)&loc, sizeof loc);
+            }
             set_timeouts(s, 300);
             struct sockaddr_in dst;
             memset(&dst, 0, sizeof dst);
             dst.sin_family = AF_INET;
             dst.sin_port = htons(5351);
             inet_pton(AF_INET, g_gw_ip, &dst.sin_addr);
-            for (int op = 1; op <= 2; op++) {
-                uint8_t m[12];
-                memset(m, 0, sizeof m);
-                m[1] = (uint8_t)op;
-                m[4] = (uint8_t)((p >> 8) & 255);
-                m[5] = (uint8_t)(p & 255);
-                sendto(s, (const char *)m, 12, 0, (struct sockaddr *)&dst, sizeof dst);
+            if (g_method == 2) {
+                for (int op = 1; op <= 2; op++) {
+                    uint8_t m[12];
+                    memset(m, 0, sizeof m);
+                    m[1] = (uint8_t)op;
+                    m[4] = (uint8_t)((p >> 8) & 255);
+                    m[5] = (uint8_t)(p & 255);
+                    sendto(s, (const char *)m, 12, 0, (struct sockaddr *)&dst, sizeof dst);
+                }
+            } else if (inet_pton(AF_INET, g_lan_ip, &lip) == 1 && inet_pton(AF_INET, g_gw_ip, &gw) == 1) {
+                pcp_send_map(s, &dst, &lip, g_pcp_nonce, 6, p, 0, NULL, 0);
+                pcp_send_map(s, &dst, &lip, g_pcp_nonce, 17, p, 0, NULL, 0);
             }
             UCLOSE(s);
         }
@@ -444,7 +671,7 @@ int64_t upnp_unmap(int64_t port) {
     return 1;
 }
 
-// Attempts UPnP IGD then NAT-PMP to forward TCP+UDP on `port`.
+// Attempts UPnP IGD, NAT-PMP, then PCP v2 across real LAN interfaces to forward TCP+UDP on `port`.
 // Returns: 0 = mapped with public IP, 1 = mapped but CGNAT/double-NAT detected, -1 = failed.
 int64_t upnp_map(int64_t port, ub_slice pub_ip, int64_t *pub_len, ub_slice msg, int64_t *msg_len) {
     net_init();
@@ -452,56 +679,81 @@ int64_t upnp_map(int64_t port, ub_slice pub_ip, int64_t *pub_len, ub_slice msg, 
     *msg_len = 0;
     if (g_method != 0) upnp_unmap(g_mapped_port);
 
-    char local_ip[64];
-    if (!get_local_ipv4(local_ip, sizeof local_ip)) {
+    char lan_ips[4][64];
+    int n_ips = get_lan_ipv4s(lan_ips, 4);
+    if (n_ips == 0) {
         write_slice(msg, msg_len, "No local network interface found");
         return -1;
     }
 
     char pub[64] = {0};
-    char loc_url[256] = {0};
     int ok = 0;
+    int saw_igd = 0;
     const char *via = "";
+    char first_gw[64] = {0};
 
-    // 1) Try UPnP IGD
-    if (upnp_discover(loc_url, sizeof loc_url)) {
-        char chost[128], cpath[256], svc[128];
-        int cport = 80;
-        if (upnp_find_control(loc_url, chost, sizeof chost, &cport, cpath, sizeof cpath, svc, sizeof svc)) {
-            int ok_tcp = upnp_add_one(chost, cport, cpath, svc, local_ip, (int)port, "TCP", 3600);
-            int ok_udp = upnp_add_one(chost, cport, cpath, svc, local_ip, (int)port, "UDP", 3600);
-            if (ok_tcp && ok_udp) {
-                snprintf(g_ctrl_host, sizeof g_ctrl_host, "%s", chost);
-                g_ctrl_port = cport;
-                snprintf(g_ctrl_path, sizeof g_ctrl_path, "%s", cpath);
-                snprintf(g_service, sizeof g_service, "%s", svc);
-                g_method = 1;
-                g_mapped_port = (int)port;
-                char resp[2048];
-                if (upnp_soap(chost, cport, cpath, svc, "GetExternalIPAddress", "", resp, sizeof resp, 1200)) {
-                    xml_extract(resp, "NewExternalIPAddress", pub, sizeof pub);
+    for (int idx = 0; idx < n_ips && !ok; idx++) {
+        const char *local_ip = lan_ips[idx];
+        struct in_addr a;
+        if (inet_pton(AF_INET, local_ip, &a) != 1) continue;
+        uint32_t h = ntohl(a.s_addr);
+        struct in_addr gw1, gw254;
+        gw1.s_addr = htonl((h & 0xFFFFFF00u) | 1u);
+        gw254.s_addr = htonl((h & 0xFFFFFF00u) | 254u);
+        char gw1_str[64] = {0}, gw254_str[64] = {0};
+        inet_ntop(AF_INET, &gw1, gw1_str, sizeof gw1_str);
+        inet_ntop(AF_INET, &gw254, gw254_str, sizeof gw254_str);
+        if (!first_gw[0]) snprintf(first_gw, sizeof first_gw, "%s", gw1_str);
+
+        // 1) Try UPnP IGD (all unique SSDP responders on this LAN interface)
+        char urls[16][256];
+        int n_urls = upnp_discover_all(local_ip, gw1_str, urls, 16);
+        for (int u = 0; u < n_urls && !ok; u++) {
+            char chost[128], cpath[256], svc[128];
+            int cport = 80;
+            if (upnp_find_control(urls[u], chost, sizeof chost, &cport, cpath, sizeof cpath, svc, sizeof svc)) {
+                saw_igd = 1;
+                int ok_tcp = upnp_add_one(chost, cport, cpath, svc, local_ip, (int)port, "TCP", 3600);
+                int ok_udp = upnp_add_one(chost, cport, cpath, svc, local_ip, (int)port, "UDP", 3600);
+                if (ok_tcp && ok_udp) {
+                    snprintf(g_ctrl_host, sizeof g_ctrl_host, "%s", chost);
+                    g_ctrl_port = cport;
+                    snprintf(g_ctrl_path, sizeof g_ctrl_path, "%s", cpath);
+                    snprintf(g_service, sizeof g_service, "%s", svc);
+                    g_method = 1;
+                    g_mapped_port = (int)port;
+                    char resp[2048];
+                    if (upnp_soap(chost, cport, cpath, svc, "GetExternalIPAddress", "", resp, sizeof resp, 1200)) {
+                        xml_extract(resp, "NewExternalIPAddress", pub, sizeof pub);
+                    }
+                    ok = 1;
+                    via = "UPnP";
                 }
-                ok = 1;
-                via = "UPnP";
             }
         }
+
+        // 2) Fallback to NAT-PMP (v0) on .1 then .254
+        if (!ok && natpmp_try_gw(local_ip, gw1_str, (int)port, pub, sizeof pub)) { ok = 1; via = "NAT-PMP"; }
+        if (!ok && natpmp_try_gw(local_ip, gw254_str, (int)port, pub, sizeof pub)) { ok = 1; via = "NAT-PMP"; }
+
+        // 3) Fallback to PCP (v2, RFC 6887) on .1 then .254
+        if (!ok && pcp_try_gw(local_ip, gw1_str, (int)port, pub, sizeof pub)) { ok = 1; via = "PCP"; }
+        if (!ok && pcp_try_gw(local_ip, gw254_str, (int)port, pub, sizeof pub)) { ok = 1; via = "PCP"; }
     }
 
-    // 2) Fallback to NAT-PMP
     if (!ok) {
-        if (natpmp_try(local_ip, (int)port, pub, sizeof pub)) {
-            ok = 1;
-            via = "NAT-PMP";
+        char note[128];
+        if (saw_igd) {
+            snprintf(note, sizeof note, "Router %s UPnP rejected mapping - forward port manually or use playit.gg", first_gw);
+        } else {
+            snprintf(note, sizeof note, "No UPnP/NAT-PMP/PCP reply from %s (enable UPnP on router or use playit.gg)", first_gw);
         }
-    }
-
-    if (!ok) {
-        write_slice(msg, msg_len, "Router UPnP/NAT-PMP unavailable (forward port manually or use playit.gg)");
+        write_slice(msg, msg_len, note);
         return -1;
     }
 
     if (pub[0] == 0) {
-        char note[160];
+        char note[128];
         snprintf(note, sizeof note, "Mapped via %s (check whatismyip.com for public IP)", via);
         write_slice(msg, msg_len, note);
         return 0;
@@ -509,13 +761,13 @@ int64_t upnp_map(int64_t port, ub_slice pub_ip, int64_t *pub_len, ub_slice msg, 
 
     write_slice(pub_ip, pub_len, pub);
     if (is_private_or_cgnat(pub)) {
-        char note[160];
+        char note[128];
         snprintf(note, sizeof note, "Mapped via %s, but ISP uses CGNAT/double-NAT (%s) - use playit.gg", via, pub);
         write_slice(msg, msg_len, note);
         return 1;
     }
 
-    char note[160];
+    char note[128];
     snprintf(note, sizeof note, "Port %d open via %s", (int)port, via);
     write_slice(msg, msg_len, note);
     return 0;

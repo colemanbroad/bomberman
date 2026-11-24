@@ -4387,7 +4387,10 @@ fn main() {
         }
         if gfx::key_pressed("Escape") {
             if single_watch { single_watch = false; }
-            else if reel_active { reel_active = false; }
+            else if reel_active {
+                reel_active = false;
+                if mode != GameMode.Join && s.over > 75 { s.over = 75; }
+            }
             else if replays_open { replays_open = false; }
             else if stats_open { stats_open = false; }
             else if host_open { host_open = false; }
@@ -4401,7 +4404,10 @@ fn main() {
                 reel_f = 0;
                 reel_acc = 0.0;
                 reel_age = 0.0;
-                if reel_idx >= reel_end { reel_active = false; }
+                if reel_idx >= reel_end {
+                    reel_active = false;
+                    if mode != GameMode.Join && s.over > 75 { s.over = 75; }
+                }
             }
         }
         let typing = mode == GameMode.Lobby || menu_open || host_open || stats_open || replays_open || single_watch || reel_active || ui::wants_keyboard(menu);
@@ -4415,8 +4421,9 @@ fn main() {
             music_fade = min(1.0, music_fade + (min(gfx::delta_time(), 0.05) as f32) * 3.5);
             audio::set_voice(tune, if muted { 0.0 } else { mvol * music_fade }, 0.0, 1.0);
         }
+        let in_replay = single_watch || reel_active;
         let ndark = night_darkness(s);
-        audio::set_voice(night_voice, if muted || mode == GameMode.Lobby { 0.0 } else { ndark * 0.45 }, 0.0, 1.0);
+        audio::set_voice(night_voice, if muted || mode == GameMode.Lobby || in_replay { 0.0 } else { ndark * 0.45 }, 0.0, 1.0);
         ui::input_from_gfx(hud);
         ui::input_from_gfx(big);
         ui::input_from_gfx(panel);
@@ -4447,7 +4454,7 @@ fn main() {
                 joined = true;
                 got_snap = true;
                 s = f;
-                if was_joined { hear(prev, s, sfx, fx); }
+                if was_joined && !in_replay { hear(prev, s, sfx, fx); }
                 prev = s;
             }
             // Reconcile once per frame against the newest snapshot (never against intermediate burst ticks).
@@ -4642,7 +4649,11 @@ fn main() {
             }
             while acc >= 1.0 / 60.0 {
                 acc -= 1.0 / 60.0;
-                if s.over > 0 {
+                if in_replay {
+                    for i in 1..4 {
+                        if s.players[i].life != Life.Off && inp_max[i] >= 0 { ack[i] = inp_max[i]; }
+                    }
+                } else if s.over > 0 {
                     for i in 1..4 {
                         if s.players[i].life != Life.Off && inp_max[i] >= 0 {
                             ack[i] = inp_max[i];
@@ -4711,7 +4722,7 @@ fn main() {
                     }
                 }
             }
-            hear(prev, s, sfx, fx);
+            if !in_replay { hear(prev, s, sfx, fx); }
             prev = s;
         }
         for i in 4 {
@@ -4745,7 +4756,7 @@ fn main() {
         if mode != GameMode.Lobby && s.tick != last_rec_tick {
             if s.tick % 2 == 0 {
                 last_rec_tick = s.tick;
-                if s.over == 0 {
+                if s.over == 0 && !in_replay {
                     if ring.len >= 65 { remove_at(ring, 0); }
                     ring.push(s);
                 }
@@ -4862,7 +4873,11 @@ fn main() {
                     reel_idx += 1;
                     reel_f = 0;
                     reel_age = 0.0;
-                    if reel_idx >= reel_end { reel_active = false; break; }
+                    if reel_idx >= reel_end {
+                        reel_active = false;
+                        if mode != GameMode.Join && s.over > 75 { s.over = 75; }
+                        break;
+                    }
                 }
             }
         } else {
