@@ -41,7 +41,7 @@ let CAUSE_SUICIDE: u8 = 2;
 let CAUSE_SHEEP: u8 = 3;
 
 enum Character { Goose, Squirrel, Baby, Cow, Pig, Farmer }
-enum Map { Island, Forest, Mountains, Desert }
+enum Map { Island, Forest, Mountains, Desert, Sandbox }
 enum Dir { None, Up, Down, Left, Right }
 enum Life { Off, Alive, BlackSheep, FogGhost }
 enum GameMode { Lobby, Solo, Host, Join }
@@ -78,10 +78,11 @@ fn char_from_u8(v: u8) -> Character {
 }
 
 fn map_from_int(v: i64) -> Map {
-    let m = v & 3;
+    let m = ((v % 5) + 5) % 5;
     if m == 1 { return Map.Forest; }
     if m == 2 { return Map.Mountains; }
     if m == 3 { return Map.Desert; }
+    if m == 4 { return Map.Sandbox; }
     return Map.Island;
 }
 
@@ -91,6 +92,7 @@ fn map_name(m: Map) -> const u8[:] {
         Forest => { return "Forest"; },
         Mountains => { return "Mountains"; },
         Desert => { return "Desert"; },
+        Sandbox => { return "Sandbox"; },
     }
 }
 
@@ -99,6 +101,7 @@ fn map_track(m: Map) -> i64 {
         Forest => { return 0; },
         Mountains => { return 1; },
         Desert => { return 2; },
+        Sandbox => { return 3; },
         Island => { return 5; },
     }
 }
@@ -404,42 +407,99 @@ fn sheep_blocked(s: State&, k: i64, x: i64, y: i64) -> bool {
 fn reset_round(s: State&, r: rng&) {
     for fi in 98 { s.fences[fi] = 0; }
     for fi in 98 { s.flame_owner[fi] = 255; }
-    for ty in H {
-        for tx in W {
-            var g: u8 = 0;
-            let cx = min(tx, W - 1 - tx);
-            let cy = min(ty, H - 1 - ty);
-            let is_border = cx == 0 || cy == 0;
-            var is_pillar = tx % 2 == 0 && ty % 2 == 0;
-            // Subtle symmetric map layout flavor per biome
-            match s.map {
-                Island => { if tx >= 6 && tx <= 8 && ty >= 5 && ty <= 7 { is_pillar = false; } },
-                Desert => { if (tx == 4 || tx == 10) && (ty == 4 || ty == 8) { is_pillar = false; } },
-                Mountains => { if (tx == 4 || tx == 10) && ty == 6 { is_pillar = true; } },
-                Forest => {},
+    if s.map == Map.Sandbox {
+        // Playtest Sandbox: open arena with all 15 power-ups, all block types, intact & damaged fences, portals, and sheep.
+        for ty in H {
+            for tx in W {
+                let is_border = tx == 0 || tx == W - 1 || ty == 0 || ty == H - 1;
+                let is_pillar = ((tx == 2 || tx == W - 3) && (ty == 2 || ty == H - 3)) || ((tx == 4 || tx == W - 5) && ty == 6);
+                s.grid[ty * W + tx] = if is_border || is_pillar { 1 } else { 0 };
             }
-            let density = match s.map {
-                Forest => 8,
-                Desert => 6,
-                _ => 7,
-            };
-            if is_border || is_pillar { g = 1; }
-            else if cx + cy > 3 && r.rand_int(10) < density {
-                let k = r.rand_int(100);
-                g = if k < 7 { 6 }
-                    else if k < 14 { 7 }
-                    else if k < 22 { TILE_GRATE }
-                    else if k < (if s.map == Map.Forest { 38 } else { 28 }) { TILE_BRUSH }
-                    else { 2 };
-            }
-            s.grid[ty * W + tx] = g;
         }
+        // Top row (ty = 1): classic & utility power-ups
+        s.grid[1 * W + 3] = 3;                 // Flame (Range+)
+        s.grid[1 * W + 4] = 4;                 // Extra Bomb
+        s.grid[1 * W + 5] = 5;                 // Speed Bolt
+        s.grid[1 * W + 6] = 8;                 // Ghost (Invisible)
+        s.grid[1 * W + 7] = 9;                 // Kick Boot
+        s.grid[1 * W + 8] = 10;                // Heat-Seeker Missile
+        s.grid[1 * W + 9] = 11;                // Napalm Fire Trail
+        s.grid[1 * W + 10] = 12;               // Proximity Mines
+        s.grid[1 * W + 11] = 15;               // Unkickable Bombs
+        // Upper gallery (ty = 3): Builder Kit, Directional Bombs, Flamethrower, Fireball, plus Drunk & Curse off to the right
+        s.grid[3 * W + 4] = TILE_PWR_BUILD;    // Builder Kit (Q=Block, Shift+Q=Fence)
+        s.grid[3 * W + 5] = TILE_PWR_DIRBOMB;  // Directional Bombs
+        s.grid[3 * W + 6] = TILE_PWR_FLAMER;   // Flamethrower (F)
+        s.grid[3 * W + 7] = TILE_PWR_FIREBALL; // Fireball Thrower (F)
+        s.grid[3 * W + 9] = 13;                // Drunk
+        s.grid[3 * W + 10] = 14;               // Bad / Curse
+        // Bottom row (ty = 11): extra copies of core & weapon power-ups for P3/P4 or quick refills
+        s.grid[11 * W + 4] = 3;
+        s.grid[11 * W + 5] = 4;
+        s.grid[11 * W + 6] = 5;
+        s.grid[11 * W + 7] = TILE_PWR_BUILD;
+        s.grid[11 * W + 8] = TILE_PWR_FLAMER;
+        s.grid[11 * W + 9] = TILE_PWR_FIREBALL;
+        s.grid[11 * W + 10] = TILE_PWR_DIRBOMB;
+        // Center showcase (ty = 5..9): Bricks, Grates, Steel Crates, Damaged Steel Crate, Gift Crates, Brush, and Fences
+        s.grid[5 * W + 3] = 2;                 // Brick
+        s.grid[5 * W + 5] = 2;                 // Brick
+        s.grid[5 * W + 6] = TILE_GRATE;        // Semi-permeable Grate
+        s.grid[5 * W + 8] = TILE_GRATE;        // Semi-permeable Grate
+        s.grid[5 * W + 9] = 2;                 // Brick
+        s.grid[5 * W + 11] = 2;                // Brick
+        s.grid[7 * W + 3] = 6;                 // Reinforced Steel Crate (2 hits)
+        s.grid[7 * W + 5] = 6;                 // Reinforced Steel Crate (2 hits)
+        s.grid[7 * W + 7] = TILE_STEEL_DMG;    // Damaged Steel Crate (1 hit left)
+        s.grid[7 * W + 9] = 7;                 // Gift Crate
+        s.grid[7 * W + 11] = 7;                // Gift Crate
+        s.grid[9 * W + 5] = TILE_BRUSH;        // Walkable burnable Forest/Brush
+        s.grid[9 * W + 6] = TILE_BRUSH;
+        s.grid[9 * W + 8] = TILE_BRUSH;
+        s.grid[9 * W + 9] = TILE_BRUSH;
+        // Intact fences (2 hits) + a pre-damaged fence (1 hit left) for instant testing
+        fence_set(s, 5, 6, 0);                 // Intact vertical fence
+        fence_set(s, 7, 5, 1);                 // Intact horizontal fence
+        fence_set_state(s, 8, 6, 0, 1);        // Pre-damaged vertical fence
+    } else {
+        for ty in H {
+            for tx in W {
+                var g: u8 = 0;
+                let cx = min(tx, W - 1 - tx);
+                let cy = min(ty, H - 1 - ty);
+                let is_border = cx == 0 || cy == 0;
+                var is_pillar = tx % 2 == 0 && ty % 2 == 0;
+                // Subtle symmetric map layout flavor per biome
+                match s.map {
+                    Island => { if tx >= 6 && tx <= 8 && ty >= 5 && ty <= 7 { is_pillar = false; } },
+                    Desert => { if (tx == 4 || tx == 10) && (ty == 4 || ty == 8) { is_pillar = false; } },
+                    Mountains => { if (tx == 4 || tx == 10) && ty == 6 { is_pillar = true; } },
+                    Forest => {},
+                    Sandbox => {},
+                }
+                let density = match s.map {
+                    Forest => 8,
+                    Desert => 6,
+                    _ => 7,
+                };
+                if is_border || is_pillar { g = 1; }
+                else if cx + cy > 3 && r.rand_int(10) < density {
+                    let k = r.rand_int(100);
+                    g = if k < 7 { 6 }
+                        else if k < 14 { 7 }
+                        else if k < 22 { TILE_GRATE }
+                        else if k < (if s.map == Map.Forest { 38 } else { 28 }) { TILE_BRUSH }
+                        else { 2 };
+                }
+                s.grid[ty * W + tx] = g;
+            }
+        }
+        // Symmetric 2-hit boundary fences along a few central corridor edges (never trapping spawns).
+        fence_set(s, 5, 3, 0);
+        fence_set(s, W - 7, 3, 0);
+        fence_set(s, 5, H - 4, 0);
+        fence_set(s, W - 7, H - 4, 0);
     }
-    // Symmetric permanent boundary fences along a few central corridor edges (never trapping spawns).
-    fence_set(s, 5, 3, 0);
-    fence_set(s, W - 7, 3, 0);
-    fence_set(s, 5, H - 4, 0);
-    fence_set(s, W - 7, H - 4, 0);
     for i in 4 {
         let p = s.players[i];
         s.missiles[i] = Missile { .. };
@@ -471,16 +531,16 @@ fn reset_round(s: State&, r: rng&) {
         s.players[i].fireballs = 0;
     }
     for k in 2 {
-        let tx = if k == 0 { 5 } else { W - 6 };
+        let tx = if s.map == Map.Sandbox { (if k == 0 { 6 } else { 8 }) } else { (if k == 0 { 5 } else { W - 6 }) };
         s.grid[(H / 2) * W + tx] = 0;
         s.sheep[k] = Sheep { tx * TILE + TILE / 2, (H / 2) * TILE + TILE / 2, 1, Dir.None, 0, 0, 0, if k == 1 { 1 } else { 0 } };
     }
     // Linked portal pair on symmetric open interior tiles
     let pset = r.rand_int(3);
-    let ax = if pset == 2 { 5 } else { 3 };
-    let ay = if pset == 1 { H - 4 } else { 3 };
+    let ax = if s.map == Map.Sandbox { 3 } else if pset == 2 { 5 } else { 3 };
+    let ay = if s.map == Map.Sandbox { 9 } else if pset == 1 { H - 4 } else { 3 };
     let bx = W - 1 - ax;
-    let by = H - 1 - ay;
+    let by = if s.map == Map.Sandbox { 9 } else { H - 1 - ay };
     s.portals = [ax as u8, ay as u8, bx as u8, by as u8];
     if s.portals_on != 0 {
         s.grid[ay * W + ax] = 0;
@@ -2012,6 +2072,7 @@ fn map_row(m: Map) -> i64 {
         Forest => { return 1; },
         Mountains => { return 2; },
         Desert => { return 3; },
+        Sandbox => { return 2; },
     }
 }
 
@@ -2058,6 +2119,7 @@ fn map_clear_color(m: Map) -> float4 {
         Forest => { return float4 { 0.07, 0.16, 0.09, 1.0 }; },
         Mountains => { return float4 { 0.10, 0.14, 0.22, 1.0 }; },
         Desert => { return float4 { 0.32, 0.17, 0.08, 1.0 }; },
+        Sandbox => { return float4 { 0.09, 0.12, 0.18, 1.0 }; },
     }
 }
 
@@ -2067,6 +2129,7 @@ fn map_border_color(m: Map) -> ui::Color {
         Forest => { return ui::rgb(30, 62, 34); },
         Mountains => { return ui::rgb(46, 56, 78); },
         Desert => { return ui::rgb(138, 84, 42); },
+        Sandbox => { return ui::rgb(52, 74, 108); },
     }
 }
 
@@ -2100,6 +2163,11 @@ fn draw_floor(c: ui::Context, m: Map, tx: i64, ty: i64, x: f32, y: f32, t: f32) 
             if (tx + ty * 3) % 7 == 0 {
                 ui::stroke_line(c, x + t * 0.15, y + t * 0.5, x + t * 0.75, y + t * 0.45, 1.5, ui::rgba(178, 122, 62, 120));
             }
+        },
+        Sandbox => {
+            let base = if odd { ui::rgb(52, 62, 78) } else { ui::rgb(46, 56, 70) };
+            ui::fill_rect(c, ui::rect(x, y, t, t), 0.0, base);
+            ui::stroke_rect(c, ui::rect(x, y, t, t), 0.0, 1.0, ui::rgba(110, 138, 175, 45));
         },
     }
 }
@@ -2137,6 +2205,12 @@ fn draw_wall(c: ui::Context, m: Map, x: f32, y: f32, t: f32) {
             ui::stroke_rect(c, ui::rect(x + t * 0.18, y + t * 0.22, t * 0.64, t * 0.56), 2.0, 2.0, ui::rgb(132, 86, 44));
             ui::fill_triangle(c, x + t * 0.5, y + t * 0.3, x + t * 0.7, y + t * 0.68, x + t * 0.3, y + t * 0.68, ui::rgb(198, 148, 88));
         },
+        Sandbox => {
+            // Clean workshop slate-metal pillar
+            ui::fill_rect(c, ui::rect(x, y, t, t), 4.0, ui::rgb(94, 108, 128));
+            ui::fill_rect(c, ui::rect(x + t * 0.1, y + t * 0.1, t * 0.8, t * 0.18), 2.0, ui::rgb(128, 144, 168));
+            ui::stroke_rect(c, ui::rect(x + 1.0, y + 1.0, t - 2.0, t - 2.0), 4.0, 2.0, ui::rgb(58, 68, 84));
+        },
     }
 }
 
@@ -2171,8 +2245,8 @@ fn draw_brick(c: ui::Context, m: Map, x: f32, y: f32, t: f32) {
             ui::stroke_line(c, x + t * 0.55, y + t * 0.6, x + t * 0.8, y + t * 0.45, 2.0, ui::rgb(96, 140, 174));
             ui::stroke_rect(c, ui::rect(x, y, t, t), 6.0, 2.0, ui::rgb(82, 118, 150));
         },
-        Desert => {
-            // Terracotta adobe bricks
+        _ => {
+            // Classic terracotta bricks (Desert & Sandbox)
             let mortar = ui::rgb(122, 62, 34);
             ui::fill_rect(c, ui::rect(x, y, t, t), 4.0, ui::rgb(196, 108, 62));
             ui::fill_rect(c, ui::rect(x, y, t, t * 0.1), 4.0, ui::rgb(226, 140, 92));
@@ -2234,21 +2308,21 @@ fn draw_brush(c: ui::Context, map: Map, x: f32, y: f32, t: f32, tm: f32, viewer_
     let sway = sin(tm * 2.4 + x * 0.04 + y * 0.03) * t * 0.03;
     let dark = match map {
         Desert => ui::rgba(92, 118, 46, a),
-        Mountains => ui::rgba(36, 92, 64, a),
         Island => ui::rgba(28, 128, 56, a),
         Forest => ui::rgba(26, 98, 42, a),
+        _ => ui::rgba(36, 92, 64, a),
     };
     let mid = match map {
         Desert => ui::rgba(128, 152, 62, a),
-        Mountains => ui::rgba(52, 126, 86, a),
         Island => ui::rgba(48, 168, 72, a),
         Forest => ui::rgba(46, 138, 58, a),
+        _ => ui::rgba(52, 126, 86, a),
     };
     let hi = match map {
         Desert => ui::rgba(164, 186, 82, a),
-        Mountains => ui::rgba(82, 164, 114, a),
         Island => ui::rgba(88, 206, 104, a),
         Forest => ui::rgba(82, 178, 86, a),
+        _ => ui::rgba(82, 164, 114, a),
     };
     ui::fill_circle(c, ui::rect(x - t * 0.06 + sway, y + t * 0.06, t * 0.62, t * 0.62), dark);
     ui::fill_circle(c, ui::rect(x + t * 0.42 + sway, y + t * 0.08, t * 0.62, t * 0.62), dark);
@@ -4792,12 +4866,14 @@ fn main() {
                 }
                 ui::layout_row_dynamic(menu, 28.0, 1);
                 ui::label(menu, "Map (changes music & theme):", ui::TEXT_LEFT);
-                ui::layout_row_dynamic(menu, 34.0, 4);
                 let prev_map = s.map;
+                ui::layout_row_dynamic(menu, 32.0, 3);
                 if ui::option_label(menu, "Island", s.map == Map.Island) { s.map = Map.Island; }
                 if ui::option_label(menu, "Forest", s.map == Map.Forest) { s.map = Map.Forest; }
                 if ui::option_label(menu, "Mountains", s.map == Map.Mountains) { s.map = Map.Mountains; }
+                ui::layout_row_dynamic(menu, 32.0, 2);
                 if ui::option_label(menu, "Desert", s.map == Map.Desert) { s.map = Map.Desert; }
+                if ui::option_label(menu, "Sandbox (All Items)", s.map == Map.Sandbox) { s.map = Map.Sandbox; }
                 if s.map != prev_map { reset_round(s, r); }
                 ui::layout_row_dynamic(menu, 28.0, 1);
                 var dlbl: u8[>..] = [];
