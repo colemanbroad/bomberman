@@ -1686,7 +1686,8 @@ fn make_night_sfx(r: rng&) -> audio::Sound {
                 s += sin(i * TAU * 4680.0 / 48000.0) * 0.09 * env;
             }
         }
-        pcm[i] = max(-1.0, min(1.0, s)) as f32;
+        let edge = min(1.0, min(i as f64, (n - 1 - i) as f64) / 96.0);
+        pcm[i] = max(-1.0, min(1.0, s * edge)) as f32;
     }
     return audio::create_sound(pcm);
 }
@@ -1717,7 +1718,7 @@ fn drum(r: rng&, pcm: f32[>..]&, at: i64, n: i64, kick: bool, vol: f64) {
         let u = (i as f64) / (n as f64);
         phase += TAU * (150.0 - 105.0 * u) / 48000.0;
         let w = if kick { sin(phase) } else { r.rand_flt() * 2.0 - 1.0 };
-        pcm[at + i] += (w * vol * exp(-5.0 * u)) as f32;
+        pcm[at + i] += (w * vol * exp(-5.0 * u) * min(1.0, (i as f64) / 24.0)) as f32;
     }
 }
 
@@ -1942,8 +1943,8 @@ fn hear(prev: State&, s: State&, sfx: Sfx, fx: Fx&) {
             if any_win { audio::play(sfx.win, 0.8, 0.0, 1.0, false); }
         }
     }
-    // Skip only the reset_round transition (prev.over > 0 && s.over == 0); let fatal explosions & aftermath play!
-    guard !(prev.over > 0 && s.over == 0) else { return; }
+    // Skip uninitialized prev, round resets, and map/mode switches so we never blast 60+ simultaneous clanks!
+    guard prev.round_num != 0 && s.round_num == prev.round_num && !(prev.over > 0 && s.over == 0) else { return; }
     let dt = s.tick - prev.tick;
     for i in s.bombs.len {
         let b = s.bombs[i];
@@ -1964,17 +1965,22 @@ fn hear(prev: State&, s: State&, sfx: Sfx, fx: Fx&) {
             fx.shake = 9.0;
         }
     }
+    var clanks = 0;
     for i in W * H {
-        if prev.grid[i] == 6 && s.grid[i] == TILE_STEEL_DMG { audio::play(sfx.clank, 0.55, pan((i % W) * TILE), 1.05, false); }
-        else if prev.grid[i] == 0 && (s.grid[i] == 2 || s.grid[i] == 6 || s.grid[i] == 7) { audio::play(sfx.clank, 0.3, pan((i % W) * TILE), 0.7, false); }
+        if clanks >= 2 { break; }
+        if prev.grid[i] == 6 && s.grid[i] == TILE_STEEL_DMG { audio::play(sfx.clank, 0.55, pan((i % W) * TILE), 1.05, false); clanks += 1; }
+        else if prev.grid[i] == 0 && (s.grid[i] == 2 || s.grid[i] == 6 || s.grid[i] == 7) { audio::play(sfx.clank, 0.3, pan((i % W) * TILE), 0.7, false); clanks += 1; }
     }
     for ty in H {
+        if clanks >= 2 { break; }
         for tx in W {
+            if clanks >= 2 { break; }
             for bit in 2 {
+                if clanks >= 2 { break; }
                 let a = fence_state(prev, tx, ty, bit);
                 let b = fence_state(s, tx, ty, bit);
-                if b < a { audio::play(sfx.clank, 0.6, pan(tx * TILE), if b == 1 { 1.25 } else { 0.75 }, false); }
-                else if b > a { audio::play(sfx.clank, 0.35, pan(tx * TILE), 0.9, false); }
+                if b < a { audio::play(sfx.clank, 0.6, pan(tx * TILE), if b == 1 { 1.25 } else { 0.75 }, false); clanks += 1; }
+                else if b > a { audio::play(sfx.clank, 0.35, pan(tx * TILE), 0.9, false); clanks += 1; }
             }
         }
     }
@@ -4194,6 +4200,7 @@ fn main() {
     s.friendly_fire = 1;
     s.match_mode = MatchMode.FreeForAll;
     reset_round(s, r);
+    prev = s;
     var start_host = mode == GameMode.Host;
     var start_join = mode == GameMode.Join;
     if start_host {
@@ -4244,7 +4251,8 @@ fn main() {
     let mvol: f32 = if own { 0.5 } else { 0.2 };
     let songs: audio::Sound[6] = [make_music_forest(r), make_music_mountains(r), make_music_desert(r), make_music(r), make_dark(r), make_music_island(r)];
     var track = map_track(s.map);
-    var tune = if own { audio::play(audio::create_sound(pcm, info[0], info[1]), mvol, 0.0, 1.0, true) } else { audio::play(songs[track], mvol, 0.0, 1.0, true) };
+    var music_fade: f32 = 0.0;
+    var tune = if own { audio::play(audio::create_sound(pcm, info[0], info[1]), 0.0, 0.0, 1.0, true) } else { audio::play(songs[track], 0.0, 0.0, 1.0, true) };
     let night_voice = audio::play(night_snd, 0.0, 0.0, 1.0, true);
     var muted = false;
     let hud = overlay(28.0);
@@ -4401,8 +4409,12 @@ fn main() {
         if !typing && mode != GameMode.Join && gfx::key_pressed("N") && !own {          // host cycles music for everyone
             s.music_track = (((s.music_track as i64) + 1) % 6) as u8;
         }
-        if !typing && gfx::key_pressed("M") { muted = !muted; audio::set_voice(tune, if muted { 0.0 } else { mvol }, 0.0, 1.0); }
+        if !typing && gfx::key_pressed("M") { muted = !muted; audio::set_voice(tune, if muted { 0.0 } else { mvol * music_fade }, 0.0, 1.0); }
         if !typing && mode != GameMode.Join && gfx::key_pressed("T") { s.detailed_tex = if s.detailed_tex != 0 { 0 } else { 1 }; }
+        if music_fade < 1.0 {
+            music_fade = min(1.0, music_fade + (min(gfx::delta_time(), 0.05) as f32) * 3.5);
+            audio::set_voice(tune, if muted { 0.0 } else { mvol * music_fade }, 0.0, 1.0);
+        }
         let ndark = night_darkness(s);
         audio::set_voice(night_voice, if muted || mode == GameMode.Lobby { 0.0 } else { ndark * 0.45 }, 0.0, 1.0);
         ui::input_from_gfx(hud);
@@ -4431,10 +4443,11 @@ fn main() {
                 if f.tick <= lasttick { continue; }
                 lasttick = f.tick;
                 n_applied += 1;
+                let was_joined = joined;
                 joined = true;
                 got_snap = true;
                 s = f;
-                hear(prev, s, sfx, fx);
+                if was_joined { hear(prev, s, sfx, fx); }
                 prev = s;
             }
             // Reconcile once per frame against the newest snapshot (never against intermediate burst ticks).
@@ -4724,7 +4737,8 @@ fn main() {
             track = want_track;
             if !own {
                 audio::stop(tune);
-                tune = audio::play(songs[track], if muted { 0.0 } else { mvol }, 0.0, 1.0, true);
+                music_fade = 0.0;
+                tune = audio::play(songs[track], 0.0, 0.0, 1.0, true);
             }
         }
         // Record 30 Hz rolling ring buffer + per-kill replay clips for end-of-round reel & session archive.
